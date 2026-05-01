@@ -1,7 +1,7 @@
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, colorchooser
 from pathlib import Path
-import json, random, os, sys, subprocess
+import json, random, os, sys, subprocess, shutil, math
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 try:
@@ -97,8 +97,16 @@ def _scan_win_fonts():
     d = Path(r"C:\Windows\Fonts")
     fonts = {}
     if d.exists():
-        for f in sorted(d.glob("*.ttf")) + sorted(d.glob("*.TTF")):
+        files = []
+        for pattern in ("*.ttf", "*.TTF", "*.otf", "*.OTF", "*.ttc", "*.TTC"):
+            files.extend(d.glob(pattern))
+        for f in sorted(files):
             fonts[f.stem.lower()] = str(f)
+            try:
+                family = ImageFont.truetype(str(f), 16).getname()[0].lower()
+                fonts.setdefault(family, str(f))
+            except Exception:
+                pass
     for path in [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/System/Library/Fonts/Supplemental/Arial.ttf",
@@ -132,13 +140,14 @@ DISPLAY_FONTS = sorted({
     k for k in SYSTEM_FONTS
     if not any(x in k for x in ["symbol","wingdings","marlett","webdings","mt extra"])
 })
+_HEBREW_FONT_CACHE = {}
 
 HEBREW_FONT_HINTS = (
     "arial", "david", "frank", "gisha", "hadas", "miriam", "narkisim",
     "segoe", "tahoma", "times", "aharoni", "rubik", "assistant", "almoni",
 )
 
-def font_likely_supports_hebrew(name):
+def _legacy_font_likely_supports_hebrew(name):
     lname = (name or "").lower()
     if any(hint in lname for hint in HEBREW_FONT_HINTS):
         return True
@@ -151,6 +160,25 @@ def font_likely_supports_hebrew(name):
     except Exception:
         return False
 
+def font_likely_supports_hebrew(name):
+    if name in _HEBREW_FONT_CACHE:
+        return _HEBREW_FONT_CACHE[name]
+    lname = (name or "").lower()
+    if any(hint in lname for hint in HEBREW_FONT_HINTS):
+        _HEBREW_FONT_CACHE[name] = True
+        return True
+    path = SYSTEM_FONTS.get(lname)
+    if not path:
+        _HEBREW_FONT_CACHE[name] = False
+        return False
+    try:
+        font = ImageFont.truetype(path, 36)
+        result = bool(font.getmask("\u05d0\u05d1\u05d2").getbbox())
+    except Exception:
+        result = False
+    _HEBREW_FONT_CACHE[name] = result
+    return result
+
 def ordered_fonts(favorites=None):
     favorites = set(favorites or [])
     return sorted(
@@ -162,30 +190,58 @@ def ordered_fonts(favorites=None):
         ),
     )
 
-def make_vertical_gradient(size, top_hex, bottom_hex):
+def make_gradient(size, first_hex, second_hex, mode="linear", angle=90):
     width, height = size
-    top = hex_to_rgb(top_hex)
-    bottom = hex_to_rgb(bottom_hex)
-    if height <= 1:
-        return Image.new("RGBA", size, top + (255,))
+    first = hex_to_rgb(first_hex)
+    second = hex_to_rgb(second_hex)
     gradient = Image.new("RGBA", size, (0, 0, 0, 0))
     pix = gradient.load()
+    mode = (mode or "linear").lower()
+    if width <= 1 or height <= 1:
+        return Image.new("RGBA", size, first + (255,))
+    if mode == "radial":
+        cx, cy = width / 2, height / 2
+        max_d = max(1, math.hypot(cx, cy))
+        for y in range(height):
+            for x in range(width):
+                t = min(1, math.hypot(x - cx, y - cy) / max_d)
+                rgb = tuple(int(first[i] * (1 - t) + second[i] * t) for i in range(3))
+                pix[x, y] = rgb + (255,)
+        return gradient
+    if mode == "mirror":
+        for y in range(height):
+            for x in range(width):
+                t = abs((x / (width - 1)) * 2 - 1)
+                rgb = tuple(int(first[i] * (1 - t) + second[i] * t) for i in range(3))
+                pix[x, y] = rgb + (255,)
+        return gradient
+    theta = math.radians(float(angle or 0))
+    vx, vy = math.cos(theta), math.sin(theta)
+    corners = [(0, 0), (width - 1, 0), (0, height - 1), (width - 1, height - 1)]
+    dots = [x * vx + y * vy for x, y in corners]
+    mn, mx = min(dots), max(dots)
+    span = max(1e-6, mx - mn)
     for y in range(height):
-        t = y / (height - 1)
-        rgb = tuple(int(top[i] * (1 - t) + bottom[i] * t) for i in range(3))
         for x in range(width):
+            t = ((x * vx + y * vy) - mn) / span
+            rgb = tuple(int(first[i] * (1 - t) + second[i] * t) for i in range(3))
             pix[x, y] = rgb + (255,)
     return gradient
 
-def draw_gradient_text(base, pos, text, font, top_hex, bottom_hex):
+def draw_gradient_text(base, pos, text, font, first_hex, second_hex,
+                       mode="linear", angle=90, stroke_width=0, stroke_fill="#000000"):
     x, y = pos
+    if stroke_width:
+        ImageDraw.Draw(base, "RGBA").text(
+            (x, y), text, font=font, fill=(0, 0, 0, 0),
+            stroke_width=int(stroke_width), stroke_fill=hex_to_rgb(stroke_fill) + (255,))
     probe = ImageDraw.Draw(Image.new("L", (1, 1)))
-    left, top, right, bottom = probe.textbbox((0, 0), text, font=font)
+    left, top, right, bottom = probe.textbbox((0, 0), text, font=font, stroke_width=int(stroke_width or 0))
     width = max(1, right - left)
     height = max(1, bottom - top)
     mask = Image.new("L", (width, height), 0)
     ImageDraw.Draw(mask).text((-left, -top), text, font=font, fill=255)
-    gradient = make_vertical_gradient((width, height), top_hex, bottom_hex)
+    gradient = make_gradient((width, height), first_hex, second_hex, mode, angle)
     layer = Image.composite(gradient, Image.new("RGBA", (width, height), (0,0,0,0)), mask)
     base.alpha_composite(layer, (int(x + left), int(y + top)))
 
@@ -712,6 +768,9 @@ class BlessingApp:
         self.tk_preview = None
         self.asset_thumbs = []
         self._blessing_widget = None
+        self._render_after = None
+        self._image_cache = {}
+        self._font_combo_widgets = []
         # logos (PhotoImage must stay referenced — store on self)
         self._logo_nav     = None  # nav bar   ~44 px tall
         self._logo_preview = None  # preview header ~36 px tall
@@ -785,7 +844,7 @@ class BlessingApp:
         self.name         = tk.StringVar(value="שם")
         self.title_text   = tk.StringVar(value="")
         self.bg           = tk.StringVar(value="birthday_fun.png")
-        self.frame_var    = tk.StringVar(value="gold_double.png")
+        self.frame_var    = tk.StringVar(value="__none__")
         self.width_cm     = tk.DoubleVar(value=14.8)
         self.height_cm    = tk.DoubleVar(value=21.0)
         self.size_unit    = tk.StringVar(value="cm")
@@ -799,13 +858,24 @@ class BlessingApp:
         # card
         self.card_enabled = tk.BooleanVar(value=True)
         self.card_color   = tk.StringVar(value="#FFFFFF")
-        self.card_opacity = tk.IntVar(value=58)
+        self.card_opacity = tk.IntVar(value=30)
         # title style
         self.title_color  = tk.StringVar(value="#144C8A")
         self.title_size   = tk.IntVar(value=72)
         self.title_shadow = tk.BooleanVar(value=False)
+        self.title_shadow_color = tk.StringVar(value="#000000")
+        self.title_shadow_size = tk.IntVar(value=5)
+        self.title_shadow_angle = tk.IntVar(value=45)
+        self.title_shadow_opacity = tk.IntVar(value=38)
         self.title_italic = tk.BooleanVar(value=False)
         self.title_gradient = tk.BooleanVar(value=False)
+        self.title_gradient_a = tk.StringVar(value="#144C8A")
+        self.title_gradient_b = tk.StringVar(value="#F59E0B")
+        self.title_gradient_mode = tk.StringVar(value="linear")
+        self.title_gradient_angle = tk.IntVar(value=90)
+        self.title_stroke_enabled = tk.BooleanVar(value=False)
+        self.title_stroke_color = tk.StringVar(value="#FFFFFF")
+        self.title_stroke_width = tk.IntVar(value=0)
         self.title_preset = tk.StringVar(value="נקי כחול")
         self.title_font   = tk.StringVar(value="segoeui")
         self.title_x_off  = tk.IntVar(value=0)
@@ -814,13 +884,45 @@ class BlessingApp:
         self.body_color   = tk.StringVar(value="#1E293B")
         self.body_size    = tk.IntVar(value=54)
         self.body_shadow  = tk.BooleanVar(value=False)
+        self.body_shadow_color = tk.StringVar(value="#000000")
+        self.body_shadow_size = tk.IntVar(value=4)
+        self.body_shadow_angle = tk.IntVar(value=45)
+        self.body_shadow_opacity = tk.IntVar(value=32)
         self.body_italic  = tk.BooleanVar(value=False)
         self.body_gradient = tk.BooleanVar(value=False)
+        self.body_gradient_a = tk.StringVar(value="#1E293B")
+        self.body_gradient_b = tk.StringVar(value="#2563EB")
+        self.body_gradient_mode = tk.StringVar(value="linear")
+        self.body_gradient_angle = tk.IntVar(value=90)
+        self.body_stroke_enabled = tk.BooleanVar(value=False)
+        self.body_stroke_color = tk.StringVar(value="#FFFFFF")
+        self.body_stroke_width = tk.IntVar(value=0)
         self.body_line_spacing = tk.IntVar(value=122)
         self.body_preset  = tk.StringVar(value="נקי כהה")
         self.body_font    = tk.StringVar(value="segoeui")
         self.body_x_off   = tk.IntVar(value=0)
         self.body_y_off   = tk.IntVar(value=0)
+        self.third_enabled = tk.BooleanVar(value=False)
+        self.third_text    = tk.StringVar(value="")
+        self.third_color   = tk.StringVar(value="#1E293B")
+        self.third_size    = tk.IntVar(value=38)
+        self.third_font    = tk.StringVar(value="segoeui")
+        self.third_gradient = tk.BooleanVar(value=False)
+        self.third_gradient_a = tk.StringVar(value="#1E293B")
+        self.third_gradient_b = tk.StringVar(value="#F59E0B")
+        self.third_gradient_mode = tk.StringVar(value="linear")
+        self.third_gradient_angle = tk.IntVar(value=0)
+        self.third_stroke_enabled = tk.BooleanVar(value=False)
+        self.third_stroke_color = tk.StringVar(value="#FFFFFF")
+        self.third_stroke_width = tk.IntVar(value=0)
+        self.third_shadow = tk.BooleanVar(value=False)
+        self.third_shadow_color = tk.StringVar(value="#000000")
+        self.third_shadow_size = tk.IntVar(value=3)
+        self.third_shadow_angle = tk.IntVar(value=45)
+        self.third_shadow_opacity = tk.IntVar(value=28)
+        self.third_x_off  = tk.IntVar(value=0)
+        self.third_y_off  = tk.IntVar(value=0)
+        self._overflow_notice_after = None
         self._text_cache  = ""
 
     # ── styles ────────────────────────────────────────────────────────────────
@@ -1018,6 +1120,15 @@ class BlessingApp:
         self.snackbar.place(relx=0.5, rely=1.0, anchor="s", y=-82)
         self._snackbar_after = self.root.after(3000, self.snackbar.place_forget)
 
+    def schedule_render_preview(self, delay=140):
+        if self._render_after:
+            self.root.after_cancel(self._render_after)
+        self._render_after = self.root.after(delay, self._run_scheduled_render)
+
+    def _run_scheduled_render(self):
+        self._render_after = None
+        self.render_preview()
+
     def _animate_step_in(self):
         try:
             width = max(80, self._left_canvas.winfo_width())
@@ -1149,7 +1260,35 @@ class BlessingApp:
     # ── Step 2: background ────────────────────────────────────────────────────
     def build_background_step(self):
         self._section_hint("בחר/י רקע. התצוגה מתעדכנת מיד.")
+        upload = tk.Button(self.step_area, text="העלה רקע", command=self.upload_background,
+                           bg=BRAND["orange"], fg="white", bd=0, padx=12, pady=7,
+                           font=("Segoe UI",10,"bold"), cursor="hand2")
+        upload.pack(anchor="e", padx=18, pady=(0,8))
+        Tooltip(upload, "בחר תמונה מהמחשב ושמור אותה בתיקיית הרקעים")
         self.asset_grid(BG_DIR, self.bg, "background", columns=3, height=480)
+
+    def upload_background(self):
+        path = filedialog.askopenfilename(
+            title="בחר רקע",
+            filetypes=[("Images", "*.png;*.jpg;*.jpeg;*.webp;*.bmp"), ("All files", "*.*")]
+        )
+        if not path:
+            return
+        try:
+            src = Path(path)
+            stem = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in src.stem).strip("_") or "uploaded_bg"
+            dest = BG_DIR / f"{stem}.png"
+            i = 2
+            while dest.exists():
+                dest = BG_DIR / f"{stem}_{i}.png"
+                i += 1
+            img = Image.open(src).convert("RGB")
+            img.save(dest)
+            self.bg.set(dest.name)
+            self.notify("הרקע הועלה ונשמר")
+            self.show_step("background")
+        except Exception as e:
+            self.notify(f"שגיאה בהעלאת רקע: {e}")
 
     # ── Step 3: frame ─────────────────────────────────────────────────────────
     def build_frame_step(self):
@@ -1171,6 +1310,7 @@ class BlessingApp:
 
     # ── Step 5: text editor ───────────────────────────────────────────────────
     def build_text_step(self):
+        self._font_combo_widgets = []
         self._section_hint("עצב/י את הטקסט. Ctrl+C/V/A ותפריט ימני עובדים בכל תיבה.")
 
         # ── Title collapsible ─────────────────────────────────────────────
@@ -1181,7 +1321,7 @@ class BlessingApp:
                              insertbackground="white", relief="flat",
                              font=("Segoe UI",12))
         ent_title.pack(fill="x", pady=4, padx=4)
-        ent_title.bind("<KeyRelease>", lambda e: self.render_preview())
+        ent_title.bind("<KeyRelease>", lambda e: self.schedule_render_preview())
         self._add_copy_paste(ent_title)
 
         r = tk.Frame(title_col.body, bg=BRAND["panel"])
@@ -1190,6 +1330,7 @@ class BlessingApp:
         self._chk(r, "צל",  self.title_shadow)
         self._chk(r, "נטוי", self.title_italic)
         self._chk(r, "Gradient", self.title_gradient)
+        self._inline_btn(r, "Gradient...", lambda: self.open_gradient_popup("title"))
 
         self._lbl2("גודל כותרת", title_col.body)
         tk.Scale(title_col.body, from_=24, to=150, orient="horizontal",
@@ -1198,6 +1339,8 @@ class BlessingApp:
                  troughcolor=BRAND["surface"]).pack(fill="x", padx=4)
 
         self._font_combo("גופן כותרת", self.title_font, title_col.body)
+        self._shadow_controls(title_col.body, "title")
+        self._stroke_controls(title_col.body, "title")
         self._combo2("סגנון כותרת", self.title_preset,
                      ["נקי כחול","זהב אלגנטי","אדום חגיגי","כהה עם צל"],
                      self.apply_title_preset, title_col.body)
@@ -1219,7 +1362,7 @@ class BlessingApp:
         self.text_box.pack(fill="x", pady=(0,6), padx=4)
         self.text_box.delete("1.0","end")
         self.text_box.insert("1.0", self._text_cache)
-        self.text_box.bind("<KeyRelease>", lambda e: self.cache_and_render())
+        self.text_box.bind("<KeyRelease>", lambda e: self.cache_and_render(debounce=True))
 
         rb = tk.Frame(body_col.body, bg=BRAND["panel"])
         rb.pack(fill="x", pady=4)
@@ -1228,9 +1371,10 @@ class BlessingApp:
         self._chk(rb, "צל",  self.body_shadow)
         self._chk(rb, "נטוי", self.body_italic)
         self._chk(rb, "Gradient", self.body_gradient)
+        self._inline_btn(rb, "Gradient...", lambda: self.open_gradient_popup("body"))
 
         self._lbl2("גודל טקסט", body_col.body)
-        tk.Scale(body_col.body, from_=18, to=110, orient="horizontal",
+        tk.Scale(body_col.body, from_=18, to=220, orient="horizontal",
                  variable=self.body_size, command=lambda _: self.render_preview(),
                  bg=BRAND["panel"], fg="white", highlightthickness=0,
                  troughcolor=BRAND["surface"]).pack(fill="x", padx=4)
@@ -1242,6 +1386,8 @@ class BlessingApp:
                  troughcolor=BRAND["surface"]).pack(fill="x", padx=4)
 
         self._font_combo("גופן ברכה", self.body_font, body_col.body)
+        self._shadow_controls(body_col.body, "body")
+        self._stroke_controls(body_col.body, "body")
         self._combo2("סגנון טקסט", self.body_preset,
                      ["נקי כהה","כחול רך","רומנטי","מודרני עם צל"],
                      self.apply_body_preset, body_col.body)
@@ -1256,6 +1402,14 @@ class BlessingApp:
                  variable=self.body_y_off, command=lambda _: self.render_preview(),
                  bg=BRAND["panel"], fg="white", highlightthickness=0,
                  troughcolor=BRAND["surface"]).pack(fill="x", padx=4)
+
+        add_third = tk.Button(self.step_area, text="הוסף תיבת טקסט", command=self.add_third_text_box,
+                              bg=BRAND["accent"], fg="white", bd=0, padx=12, pady=7,
+                              font=("Segoe UI",10,"bold"), cursor="hand2")
+        add_third.pack(anchor="e", padx=16, pady=(8,4))
+        Tooltip(add_third, "הוסף טקסט תחתון, למשל שם נותן המתנה")
+        if self.third_enabled.get():
+            self._build_third_text_controls()
 
         # ── Card bg collapsible ───────────────────────────────────────────
         card_col = Collapsible(self.step_area, "רקע מאחורי הטקסט", start_open=False)
@@ -1330,9 +1484,82 @@ class BlessingApp:
         btn = tk.Button(parent, text=text, command=cmd, bg=BRAND["surface"], fg=BRAND["text"],
                         bd=0, padx=10, pady=5, font=("Segoe UI",9,"bold"),
                         cursor="hand2")
+        anchor = {"e": "right", "w": "left"}.get(anchor, anchor)
         btn.pack(side=anchor, padx=4)
         Tooltip(btn, text)
         return btn
+
+    def _stroke_controls(self, parent, target):
+        enabled = getattr(self, f"{target}_stroke_enabled")
+        color = getattr(self, f"{target}_stroke_color")
+        width = getattr(self, f"{target}_stroke_width")
+        box = tk.Frame(parent, bg=BRAND["panel"])
+        box.pack(fill="x", pady=4)
+        self._chk(box, "Stroke", enabled)
+        self._inline_btn(box, "צבע קו", lambda c=color: self.pick_var_color(c, "צבע קו מתאר"))
+        tk.Label(box, text="עובי", bg=BRAND["panel"], fg=BRAND["muted"],
+                 font=("Segoe UI",9)).pack(side="right", padx=(8,2))
+        tk.Spinbox(box, from_=0, to=18, textvariable=width, width=4, justify="center",
+                   command=self.render_preview, bg=BRAND["surface"], fg=BRAND["text"],
+                   relief="flat").pack(side="right")
+
+    def _shadow_controls(self, parent, target):
+        enabled = getattr(self, f"{target}_shadow")
+        color = getattr(self, f"{target}_shadow_color")
+        size = getattr(self, f"{target}_shadow_size")
+        angle = getattr(self, f"{target}_shadow_angle")
+        opacity = getattr(self, f"{target}_shadow_opacity")
+        box = tk.Frame(parent, bg=BRAND["panel"])
+        box.pack(fill="x", pady=4)
+        self._chk(box, "Shadow", enabled)
+        self._inline_btn(box, "צבע צל", lambda c=color: self.pick_var_color(c, "צבע צל"))
+        for label, var, max_value in [("גודל", size, 40), ("זווית", angle, 360), ("שקיפות", opacity, 100)]:
+            tk.Label(box, text=label, bg=BRAND["panel"], fg=BRAND["muted"],
+                     font=("Segoe UI",9)).pack(side="right", padx=(8,2))
+            tk.Spinbox(box, from_=0, to=max_value, textvariable=var, width=4, justify="center",
+                       command=self.schedule_render_preview, bg=BRAND["surface"], fg=BRAND["text"],
+                       relief="flat").pack(side="right")
+
+    def add_third_text_box(self):
+        self.third_enabled.set(True)
+        if not self.third_text.get().strip():
+            self.third_text.set("מאת ...")
+        self.show_step("text")
+
+    def _build_third_text_controls(self):
+        third_col = Collapsible(self.step_area, "תיבת טקסט תחתונה", start_open=True)
+        row = tk.Frame(third_col.body, bg=BRAND["panel"])
+        row.pack(fill="x", pady=4)
+        self._chk(row, "הצג", self.third_enabled)
+        ent = tk.Entry(third_col.body, textvariable=self.third_text, justify="right",
+                       bg=BRAND["surface"], fg=BRAND["text"], insertbackground="white",
+                       relief="flat", font=("Segoe UI",12))
+        ent.pack(fill="x", pady=4, padx=4)
+        ent.bind("<KeyRelease>", lambda e: self.schedule_render_preview())
+        self._add_copy_paste(ent)
+        tools = tk.Frame(third_col.body, bg=BRAND["panel"])
+        tools.pack(fill="x", pady=4)
+        self._inline_btn(tools, "צבע", lambda: self.pick_var_color(self.third_color, "צבע טקסט תחתון"))
+        self._chk(tools, "Gradient", self.third_gradient)
+        self._inline_btn(tools, "Gradient...", lambda: self.open_gradient_popup("third"))
+        self._font_combo("גופן", self.third_font, third_col.body)
+        self._shadow_controls(third_col.body, "third")
+        self._stroke_controls(third_col.body, "third")
+        self._lbl2("גודל", third_col.body)
+        tk.Scale(third_col.body, from_=14, to=160, orient="horizontal",
+                 variable=self.third_size, command=lambda _: self.render_preview(),
+                 bg=BRAND["panel"], fg="white", highlightthickness=0,
+                 troughcolor=BRAND["surface"]).pack(fill="x", padx=4)
+        self._lbl2("מיקום X", third_col.body)
+        tk.Scale(third_col.body, from_=-50, to=50, orient="horizontal",
+                 variable=self.third_x_off, command=lambda _: self.render_preview(),
+                 bg=BRAND["panel"], fg="white", highlightthickness=0,
+                 troughcolor=BRAND["surface"]).pack(fill="x", padx=4)
+        self._lbl2("מיקום Y", third_col.body)
+        tk.Scale(third_col.body, from_=-50, to=50, orient="horizontal",
+                 variable=self.third_y_off, command=lambda _: self.render_preview(),
+                 bg=BRAND["panel"], fg="white", highlightthickness=0,
+                 troughcolor=BRAND["surface"]).pack(fill="x", padx=4)
 
     def _combo(self, label, var, values, command=None):
         row = tk.Frame(self.step_area, bg=BRAND["panel"])
@@ -1370,7 +1597,8 @@ class BlessingApp:
         cb = ttk.Combobox(top, textvariable=var, values=ordered_fonts(self.font_favorites),
                           state="normal", justify="right", font=("Segoe UI",9))
         cb.pack(side="right", fill="x", expand=True)
-        preview = tk.Label(row, textvariable=var, bg=BRAND["panel"], fg=BRAND["text"],
+        self._font_combo_widgets.append(cb)
+        preview = tk.Label(row, text="", bg=BRAND["panel"], fg=BRAND["text"],
                            font=("Segoe UI", 10), anchor="e")
         preview.pack(fill="x")
         def refresh(_event=None):
@@ -1379,10 +1607,10 @@ class BlessingApp:
             if path:
                 try:
                     family = ImageFont.truetype(path, 12).getname()[0]
-                    preview.configure(font=(family, 12))
+                    preview.configure(font=(family, 12), text=f"{var.get()}  אבגדה Hadish")
                 except Exception:
-                    preview.configure(font=("Segoe UI", 10))
-            self.render_preview()
+                    preview.configure(font=("Segoe UI", 10), text=f"{var.get()}  אבגדה Hadish")
+            self.schedule_render_preview()
         cb.bind("<<ComboboxSelected>>", refresh)
         cb.bind("<KeyRelease>", refresh)
         refresh()
@@ -1399,7 +1627,13 @@ class BlessingApp:
             self.font_favorites.add(name)
             self.notify("הגופן נוסף למועדפים")
         self._save_settings()
-        self.render_preview()
+        values = ordered_fonts(self.font_favorites)
+        for cb in getattr(self, "_font_combo_widgets", []):
+            try:
+                cb.configure(values=values)
+            except Exception:
+                pass
+        self.schedule_render_preview()
 
     def _make_text(self, parent, height=6):
         txt = tk.Text(parent, height=height, wrap="word",
@@ -1481,10 +1715,13 @@ class BlessingApp:
         except Exception:
             self.notify("לא נמצא טקסט להדבקה")
 
-    def cache_and_render(self):
+    def cache_and_render(self, debounce=False):
         if hasattr(self,"text_box") and self.text_box.winfo_exists():
             self._text_cache = self.text_box.get("1.0","end").strip()
-        self.render_preview()
+        if debounce:
+            self.schedule_render_preview()
+        else:
+            self.render_preview()
 
     # ── presets ───────────────────────────────────────────────────────────────
     def apply_title_preset(self):
@@ -1508,24 +1745,68 @@ class BlessingApp:
         return {
             "title_color": self.title_color.get(), "title_size": self.title_size.get(),
             "title_shadow": self.title_shadow.get(), "title_italic": self.title_italic.get(),
+            "title_shadow_color": self.title_shadow_color.get(), "title_shadow_size": self.title_shadow_size.get(),
+            "title_shadow_angle": self.title_shadow_angle.get(), "title_shadow_opacity": self.title_shadow_opacity.get(),
             "title_gradient": self.title_gradient.get(), "title_font": self.title_font.get(),
+            "title_gradient_a": self.title_gradient_a.get(), "title_gradient_b": self.title_gradient_b.get(),
+            "title_gradient_mode": self.title_gradient_mode.get(), "title_gradient_angle": self.title_gradient_angle.get(),
+            "title_stroke_enabled": self.title_stroke_enabled.get(), "title_stroke_color": self.title_stroke_color.get(),
+            "title_stroke_width": self.title_stroke_width.get(),
             "body_color": self.body_color.get(), "body_size": self.body_size.get(),
             "body_shadow": self.body_shadow.get(), "body_italic": self.body_italic.get(),
+            "body_shadow_color": self.body_shadow_color.get(), "body_shadow_size": self.body_shadow_size.get(),
+            "body_shadow_angle": self.body_shadow_angle.get(), "body_shadow_opacity": self.body_shadow_opacity.get(),
             "body_gradient": self.body_gradient.get(), "body_line_spacing": self.body_line_spacing.get(),
+            "body_gradient_a": self.body_gradient_a.get(), "body_gradient_b": self.body_gradient_b.get(),
+            "body_gradient_mode": self.body_gradient_mode.get(), "body_gradient_angle": self.body_gradient_angle.get(),
+            "body_stroke_enabled": self.body_stroke_enabled.get(), "body_stroke_color": self.body_stroke_color.get(),
+            "body_stroke_width": self.body_stroke_width.get(),
             "body_font": self.body_font.get(), "card_enabled": self.card_enabled.get(),
             "card_color": self.card_color.get(), "card_opacity": self.card_opacity.get(),
+            "third_enabled": self.third_enabled.get(), "third_color": self.third_color.get(),
+            "third_size": self.third_size.get(), "third_font": self.third_font.get(),
+            "third_gradient": self.third_gradient.get(), "third_gradient_a": self.third_gradient_a.get(),
+            "third_gradient_b": self.third_gradient_b.get(), "third_gradient_mode": self.third_gradient_mode.get(),
+            "third_gradient_angle": self.third_gradient_angle.get(),
+            "third_stroke_enabled": self.third_stroke_enabled.get(), "third_stroke_color": self.third_stroke_color.get(),
+            "third_stroke_width": self.third_stroke_width.get(),
+            "third_shadow": self.third_shadow.get(), "third_shadow_color": self.third_shadow_color.get(),
+            "third_shadow_size": self.third_shadow_size.get(), "third_shadow_angle": self.third_shadow_angle.get(),
+            "third_shadow_opacity": self.third_shadow_opacity.get(),
         }
 
     def _apply_style_snapshot(self, data):
         mapping = {
             "title_color": self.title_color, "title_size": self.title_size,
             "title_shadow": self.title_shadow, "title_italic": self.title_italic,
+            "title_shadow_color": self.title_shadow_color, "title_shadow_size": self.title_shadow_size,
+            "title_shadow_angle": self.title_shadow_angle, "title_shadow_opacity": self.title_shadow_opacity,
             "title_gradient": self.title_gradient, "title_font": self.title_font,
+            "title_gradient_a": self.title_gradient_a, "title_gradient_b": self.title_gradient_b,
+            "title_gradient_mode": self.title_gradient_mode, "title_gradient_angle": self.title_gradient_angle,
+            "title_stroke_enabled": self.title_stroke_enabled, "title_stroke_color": self.title_stroke_color,
+            "title_stroke_width": self.title_stroke_width,
             "body_color": self.body_color, "body_size": self.body_size,
             "body_shadow": self.body_shadow, "body_italic": self.body_italic,
+            "body_shadow_color": self.body_shadow_color, "body_shadow_size": self.body_shadow_size,
+            "body_shadow_angle": self.body_shadow_angle, "body_shadow_opacity": self.body_shadow_opacity,
             "body_gradient": self.body_gradient, "body_line_spacing": self.body_line_spacing,
+            "body_gradient_a": self.body_gradient_a, "body_gradient_b": self.body_gradient_b,
+            "body_gradient_mode": self.body_gradient_mode, "body_gradient_angle": self.body_gradient_angle,
+            "body_stroke_enabled": self.body_stroke_enabled, "body_stroke_color": self.body_stroke_color,
+            "body_stroke_width": self.body_stroke_width,
             "body_font": self.body_font, "card_enabled": self.card_enabled,
             "card_color": self.card_color, "card_opacity": self.card_opacity,
+            "third_enabled": self.third_enabled, "third_color": self.third_color,
+            "third_size": self.third_size, "third_font": self.third_font,
+            "third_gradient": self.third_gradient, "third_gradient_a": self.third_gradient_a,
+            "third_gradient_b": self.third_gradient_b, "third_gradient_mode": self.third_gradient_mode,
+            "third_gradient_angle": self.third_gradient_angle,
+            "third_stroke_enabled": self.third_stroke_enabled, "third_stroke_color": self.third_stroke_color,
+            "third_stroke_width": self.third_stroke_width,
+            "third_shadow": self.third_shadow, "third_shadow_color": self.third_shadow_color,
+            "third_shadow_size": self.third_shadow_size, "third_shadow_angle": self.third_shadow_angle,
+            "third_shadow_opacity": self.third_shadow_opacity,
         }
         for key, var in mapping.items():
             if key in data:
@@ -1573,19 +1854,96 @@ class BlessingApp:
         if c and c[1]: self.body_color.set(c[1]); self.render_preview()
 
     # ── canvas size ───────────────────────────────────────────────────────────
-    def get_canvas_size(self):
+    def pick_var_color(self, var, title="בחר צבע"):
+        c = colorchooser.askcolor(initialcolor=var.get(), title=title)
+        if c and c[1]:
+            var.set(c[1])
+            self.render_preview()
+
+    def open_gradient_popup(self, target):
+        enabled = getattr(self, f"{target}_gradient")
+        color_a = getattr(self, f"{target}_gradient_a")
+        color_b = getattr(self, f"{target}_gradient_b")
+        mode = getattr(self, f"{target}_gradient_mode")
+        angle = getattr(self, f"{target}_gradient_angle")
+        enabled.set(True)
+        win = tk.Toplevel(self.root)
+        win.title("Gradient")
+        win.configure(bg=BRAND["panel"])
+        win.transient(self.root)
+        win.grab_set()
+        tk.Label(win, text="Gradient", bg=BRAND["panel"], fg=BRAND["gold"],
+                 font=("Segoe UI Semibold", 14)).pack(anchor="e", padx=16, pady=(12,6))
+        row = tk.Frame(win, bg=BRAND["panel"])
+        row.pack(fill="x", padx=16, pady=6)
+        self._inline_btn(row, "צבע ראשון", lambda: self.pick_var_color(color_a, "צבע ראשון"))
+        self._inline_btn(row, "צבע שני", lambda: self.pick_var_color(color_b, "צבע שני"))
+        tk.Label(row, textvariable=color_a, bg=BRAND["panel"], fg=BRAND["text"]).pack(side="right", padx=8)
+        tk.Label(row, textvariable=color_b, bg=BRAND["panel"], fg=BRAND["text"]).pack(side="right", padx=8)
+        self._combo2("שיטת שילוב", mode, ["linear", "radial", "mirror"], self.render_preview, win)
+        tk.Label(win, text="זווית", bg=BRAND["panel"], fg=BRAND["muted"],
+                 font=("Segoe UI",9)).pack(anchor="e", padx=16)
+        tk.Scale(win, from_=0, to=360, orient="horizontal", variable=angle,
+                 command=lambda _: self.render_preview(), bg=BRAND["panel"],
+                 fg="white", highlightthickness=0, troughcolor=BRAND["surface"]).pack(fill="x", padx=16)
+        preview = tk.Canvas(win, width=260, height=54, bg=BRAND["surface"], highlightthickness=0)
+        preview.pack(padx=16, pady=10)
+        def paint_preview():
+            if not win.winfo_exists():
+                return
+            img = make_gradient((260, 54), color_a.get(), color_b.get(), mode.get(), angle.get())
+            tk_img = ImageTk.PhotoImage(img)
+            preview._img = tk_img
+            preview.delete("all")
+            preview.create_image(0, 0, anchor="nw", image=tk_img)
+            win.after(160, paint_preview)
+        paint_preview()
+        tk.Button(win, text="סגור", command=lambda: [self.render_preview(), win.destroy()],
+                  bg=BRAND["accent"], fg="white", bd=0, padx=16, pady=7,
+                  font=("Segoe UI",10,"bold"), cursor="hand2").pack(pady=(0,14))
+
+    def get_canvas_size(self, dpi=300):
         w, h = float(self.width_cm.get()), float(self.height_cm.get())
         ori = self.orientation.get()
         if ori == "Landscape" and h > w: w, h = h, w
         elif ori == "Portrait"  and w > h: w, h = h, w
         elif ori == "Auto" and len(self._text_cache) > 260 and h > w: w, h = h, w
-        return cm_to_px(w), cm_to_px(h)
+        return cm_to_px(w, dpi=dpi), cm_to_px(h, dpi=dpi)
+
+    def _cached_resized_image(self, path, size, mode):
+        key = (str(path), size, mode)
+        cached = self._image_cache.get(key)
+        if cached is not None:
+            return cached.copy()
+        img = Image.open(path).convert(mode).resize(size, Image.Resampling.LANCZOS)
+        if len(self._image_cache) > 24:
+            self._image_cache.clear()
+        self._image_cache[key] = img.copy()
+        return img
+
+    def _shadow_args(self, target):
+        enabled = getattr(self, f"{target}_shadow").get()
+        if not enabled:
+            return None
+        size = int(getattr(self, f"{target}_shadow_size").get())
+        angle = math.radians(float(getattr(self, f"{target}_shadow_angle").get()))
+        opacity = max(0, min(100, int(getattr(self, f"{target}_shadow_opacity").get())))
+        color = hex_to_rgb(getattr(self, f"{target}_shadow_color").get()) + (int(255 * opacity / 100),)
+        return int(round(math.cos(angle) * size)), int(round(math.sin(angle) * size)), color
+
+    def _draw_shadow(self, draw, target, pos, text, font):
+        shadow = self._shadow_args(target)
+        if not shadow:
+            return
+        dx, dy, fill = shadow
+        draw.text((pos[0] + dx, pos[1] + dy), text, font=font, fill=fill)
 
     # ── render ────────────────────────────────────────────────────────────────
-    def render_image(self):
-        Wpx, Hpx = self.get_canvas_size()
+    def render_image(self, dpi=300):
+        self._render_overflow_messages = []
+        Wpx, Hpx = self.get_canvas_size(dpi=dpi)
         bp = BG_DIR / self.bg.get()
-        bg_img = Image.open(bp).convert("RGB").resize((Wpx,Hpx), Image.Resampling.LANCZOS) \
+        bg_img = self._cached_resized_image(bp, (Wpx,Hpx), "RGB") \
                  if bp.exists() else Image.new("RGB",(Wpx,Hpx),"white")
         img  = bg_img.convert("RGBA")
         safe = int(min(Wpx,Hpx) * 0.075)
@@ -1596,6 +1954,8 @@ class BlessingApp:
         ty_off    = int(self.title_y_off.get() * Hpx / 100)
         bx_off    = int(self.body_x_off.get()  * Wpx / 100)
         by_off    = int(self.body_y_off.get()  * Hpx / 100)
+        thx_off   = int(self.third_x_off.get() * Wpx / 100)
+        thy_off   = int(self.third_y_off.get() * Hpx / 100)
 
         if has_title:
             body_box  = [safe*2, int(Hpx*0.30), Wpx-safe*2, int(Hpx*0.76)]
@@ -1626,7 +1986,7 @@ class BlessingApp:
         if fn != "__none__":
             fp = FRAME_DIR / fn
             if fp.exists():
-                fr = Image.open(fp).convert("RGBA").resize((Wpx,Hpx), Image.Resampling.LANCZOS)
+                fr = self._cached_resized_image(fp, (Wpx,Hpx), "RGBA")
                 img.alpha_composite(fr)
 
         d = ImageDraw.Draw(img, "RGBA")
@@ -1649,22 +2009,31 @@ class BlessingApp:
             vis   = bidi_text(title)
             bb    = d.textbbox((0,0), vis, font=tfont)
             tx    = (Wpx - (bb[2]-bb[0])) / 2 + tx_off
-            if self.title_shadow.get():
-                d.text((tx+5, title_y+5), vis, font=tfont, fill=(0,0,0,95))
+            t_stroke = self.title_stroke_width.get() if self.title_stroke_enabled.get() else 0
+            if bb[2] - bb[0] > Wpx - safe * 2:
+                self._render_overflow_messages.append("הכותרת גדולה מדי לשטח הברכה")
+            self._draw_shadow(d, "title", (tx, title_y), vis, tfont)
             if self.title_gradient.get():
-                draw_gradient_text(img, (tx, title_y), vis, tfont, self.title_color.get(), "#F59E0B")
+                draw_gradient_text(
+                    img, (tx, title_y), vis, tfont,
+                    self.title_gradient_a.get(), self.title_gradient_b.get(),
+                    self.title_gradient_mode.get(), self.title_gradient_angle.get(),
+                    t_stroke, self.title_stroke_color.get())
             else:
-                d.text((tx, title_y), vis, font=tfont, fill=hex_to_rgb(self.title_color.get())+(255,))
+                d.text((tx, title_y), vis, font=tfont, fill=hex_to_rgb(self.title_color.get())+(255,),
+                       stroke_width=int(t_stroke), stroke_fill=hex_to_rgb(self.title_stroke_color.get())+(255,))
 
         # body
         body_text = self._text_cache.strip() or "הקלד/י כאן את הברכה..."
         max_sz    = int(self.body_size.get() * (min(Wpx,Hpx)/1748))
-        max_sz    = max(20, min(max_sz, 130))
+        max_sz    = max(20, min(max_sz, 260))
         try:
             font, lines, line_h = fit_text(
                 d, body_text, body_box, b_fp, max_size=max_sz,
                 line_spacing=max(0.8, self.body_line_spacing.get() / 100),
             )
+            if getattr(font, "size", max_sz) < max_sz - 1:
+                self._render_overflow_messages.append("גודל הטקסט חורג מהשטח ולכן הוקטן אוטומטית")
         except Exception:
             try:    font = ImageFont.truetype(b_fp, 28) if b_fp else ImageFont.load_default()
             except: font = ImageFont.load_default()
@@ -1672,17 +2041,47 @@ class BlessingApp:
         total_h = line_h * len(lines)
         y = body_box[1] + max(0, (body_box[3]-body_box[1]-total_h)//2)
         body_rgb = hex_to_rgb(self.body_color.get())
+        b_stroke = self.body_stroke_width.get() if self.body_stroke_enabled.get() else 0
         for line in lines:
             vis = bidi_text(line)
             bb  = d.textbbox((0,0), vis, font=font)
             x   = (Wpx - (bb[2]-bb[0])) / 2
-            if self.body_shadow.get():
-                d.text((x+4, y+4), vis, font=font, fill=(0,0,0,80))
+            self._draw_shadow(d, "body", (x, y), vis, font)
             if self.body_gradient.get():
-                draw_gradient_text(img, (x, y), vis, font, self.body_color.get(), "#2563EB")
+                draw_gradient_text(
+                    img, (x, y), vis, font,
+                    self.body_gradient_a.get(), self.body_gradient_b.get(),
+                    self.body_gradient_mode.get(), self.body_gradient_angle.get(),
+                    b_stroke, self.body_stroke_color.get())
             else:
-                d.text((x, y), vis, font=font, fill=body_rgb+(255,))
+                d.text((x, y), vis, font=font, fill=body_rgb+(255,),
+                       stroke_width=int(b_stroke), stroke_fill=hex_to_rgb(self.body_stroke_color.get())+(255,))
             y += line_h
+
+        if self.third_enabled.get() and self.third_text.get().strip():
+            third = bidi_text(self.third_text.get().strip())
+            th_fp = resolve_font(self.third_font.get())
+            th_sz = int(self.third_size.get() * (min(Wpx,Hpx)/1748))
+            th_sz = max(14, min(th_sz, 180))
+            try:    th_font = ImageFont.truetype(th_fp, th_sz) if th_fp else ImageFont.load_default()
+            except: th_font = ImageFont.load_default()
+            th_bb = d.textbbox((0,0), third, font=th_font)
+            th_x = (Wpx - (th_bb[2] - th_bb[0])) / 2 + thx_off
+            th_y = int(Hpx * 0.80) + thy_off
+            if th_bb[2] - th_bb[0] > Wpx - safe * 2 or th_y + (th_bb[3] - th_bb[1]) > Hpx - safe:
+                self._render_overflow_messages.append("תיבת הטקסט התחתונה חורגת מהברכה")
+            th_stroke = self.third_stroke_width.get() if self.third_stroke_enabled.get() else 0
+            if self.third_gradient.get():
+                self._draw_shadow(d, "third", (th_x, th_y), third, th_font)
+                draw_gradient_text(
+                    img, (th_x, th_y), third, th_font,
+                    self.third_gradient_a.get(), self.third_gradient_b.get(),
+                    self.third_gradient_mode.get(), self.third_gradient_angle.get(),
+                    th_stroke, self.third_stroke_color.get())
+            else:
+                self._draw_shadow(d, "third", (th_x, th_y), third, th_font)
+                d.text((th_x, th_y), third, font=th_font, fill=hex_to_rgb(self.third_color.get())+(255,),
+                       stroke_width=int(th_stroke), stroke_fill=hex_to_rgb(self.third_stroke_color.get())+(255,))
 
         return img.convert("RGB")
 
@@ -1694,7 +2093,7 @@ class BlessingApp:
                 # or when we intentionally want to clear it (val=="", cache already "")
                 if val or not self._text_cache:
                     self._text_cache = val
-            self.last_image = self.render_image()
+            self.last_image = self.render_image(dpi=110)
             prev = self.last_image.copy()
             area_w = max(380, self.right.winfo_width()-40)
             area_h = max(380, self.right.winfo_height()-80)
@@ -1702,10 +2101,17 @@ class BlessingApp:
             self._preview_size = prev.size
             self.tk_preview = ImageTk.PhotoImage(prev)
             self.preview_label.configure(image=self.tk_preview, text="")
+            messages = getattr(self, "_render_overflow_messages", [])
+            if messages and not self._overflow_notice_after:
+                self.notify(messages[0])
+                self._overflow_notice_after = self.root.after(3500, self._clear_overflow_notice_lock)
         except Exception as e:
             self.preview_label.configure(text=f"שגיאה בתצוגה:\n{e}", image="")
 
     # ── export ────────────────────────────────────────────────────────────────
+    def _clear_overflow_notice_lock(self):
+        self._overflow_notice_after = None
+
     def _preview_drag_start(self, event):
         size = getattr(self, "_preview_size", None)
         if not size:
@@ -1718,11 +2124,15 @@ class BlessingApp:
         if not (left <= event.x <= left + img_w and top <= event.y <= top + img_h):
             return
         rel_y = (event.y - top) / max(1, img_h)
-        target = "title" if self.title_text.get().strip() and rel_y < 0.34 else "body"
+        if self.third_enabled.get() and self.third_text.get().strip() and rel_y > 0.70:
+            target = "third"
+        else:
+            target = "title" if self.title_text.get().strip() and rel_y < 0.34 else "body"
         self._drag_preview = {
             "target": target, "x": event.x, "y": event.y,
             "title_x": self.title_x_off.get(), "title_y": self.title_y_off.get(),
             "body_x": self.body_x_off.get(), "body_y": self.body_y_off.get(),
+            "third_x": self.third_x_off.get(), "third_y": self.third_y_off.get(),
             "img_w": img_w, "img_h": img_h,
         }
 
@@ -1735,9 +2145,12 @@ class BlessingApp:
         if drag["target"] == "title":
             self.title_x_off.set(max(-50, min(50, drag["title_x"] + dx)))
             self.title_y_off.set(max(-50, min(50, drag["title_y"] + dy)))
-        else:
+        elif drag["target"] == "body":
             self.body_x_off.set(max(-50, min(50, drag["body_x"] + dx)))
             self.body_y_off.set(max(-50, min(50, drag["body_y"] + dy)))
+        else:
+            self.third_x_off.set(max(-50, min(50, drag["third_x"] + dx)))
+            self.third_y_off.set(max(-50, min(50, drag["third_y"] + dy)))
         self.render_preview()
 
     def _preview_drag_end(self, _event):
