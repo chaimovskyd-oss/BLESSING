@@ -1,13 +1,18 @@
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, colorchooser
 from pathlib import Path
-import json, random, os, sys, subprocess, shutil, math
+import json, random, os, sys, subprocess, shutil, math, ctypes
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 try:
     from bidi.algorithm import get_display
 except Exception:
     get_display = None
+
+try:
+    import cairosvg as _cairosvg
+except Exception:
+    _cairosvg = None
 
 APP_DIR   = Path(__file__).resolve().parent
 BG_DIR    = APP_DIR / "assets" / "backgrounds"
@@ -32,7 +37,7 @@ def _make_logo_tk(height_px: int) -> "ImageTk.PhotoImage | None":
     except Exception:
         return None
 
-# ── inject tool on sys.path ───────────────────────────────────────────────────
+# ?? inject tool on sys.path ???????????????????????????????????????????????????
 _BlessingRepo = None
 TOOL_AVAILABLE = False
 if TOOL_DIR.exists():
@@ -45,11 +50,11 @@ if TOOL_DIR.exists():
     except Exception:
         pass
 
-# ── constants ─────────────────────────────────────────────────────────────────
+# ?? constants ?????????????????????????????????????????????????????????????????
 PRODUCT_PRESETS_CM = {
     "A5":           {"size": (14.8, 21.0),  "title": "A5",           "desc": "ברכה קלאסית למתנה, יפה למסגרת קטנה או צירוף למארז."},
     "A4":           {"size": (21.0, 29.7),  "title": "A4",           "desc": "מתאים לפוסטר קטן, ברכה גדולה, תלייה או הצגה על שולחן."},
-    "10x15":        {"size": (10.0, 15.0),  "title": "10x15",        "desc": "גודל קטן ומהיר, מתאים לצירוף למתנה או הדפסה פוטו."},
+    "10x15":        {"size": (10.2, 15.32),  "title": "10x15",        "desc": "גודל קטן ומהיר, מתאים לצירוף למתנה או הדפסה פוטו."},
     "20x20":        {"size": (20.0, 20.0),  "title": "20x20",        "desc": "ריבוע מעוצב, מתאים למראה מודרני או מתנה מיוחדת."},
     "מותאם אישית": {"size": (14.8, 21.0),  "title": "מותאם אישית", "desc": "הזנת מידה ידנית בס״מ לכל מוצר מיוחד."},
 }
@@ -92,41 +97,76 @@ RECIPIENT_COLORS = {
     "רואה חשבון": "#ECFDF5", "מנהל": "#E2E8F0", "מפקד": "#DCFCE7", "עובד": "#F1F5F9",
 }
 
-# ── font scanning ─────────────────────────────────────────────────────────────
-def _scan_win_fonts():
-    d = Path(r"C:\Windows\Fonts")
-    fonts = {}
-    if d.exists():
+# ?? font scanning ?????????????????????????????????????????????????????????????
+_FONT_SKIP_TERMS = frozenset([
+    "symbol","wingdings","marlett","webdings","mt extra","emoji","historic",
+    "mdl2","seguiemj","seguihis","seguisym","seguipcl","segoepr","segoescl",
+    "seguisl","segoeuisl","holomdl2","segoe mdl2",
+])
+_REGULAR_SUBFAMILIES = frozenset(["regular","book","roman","normal","","medium","plain"])
+
+def _scan_font_dirs():
+    """Scan system + user font directories. Returns (all_fonts_dict, display_dict).
+    all_fonts_dict : stem_lower ג†’ path  (+ family_lower ג†’ path for resolve)
+    display_dict   : "Family Name" ג†’ path  (Regular subfamily only, filtered)
+    """
+    all_fonts   = {}
+    display     = {}   # {display_name: path}
+    seen_lower  = set()
+
+    dirs = [Path(r"C:\Windows\Fonts")]
+    user_local = os.environ.get("LOCALAPPDATA", "")
+    if user_local:
+        u = Path(user_local) / "Microsoft" / "Windows" / "Fonts"
+        if u.exists():
+            dirs.append(u)
+    # macOS / Linux fallbacks
+    for p in ["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+               "/System/Library/Fonts/Supplemental/Arial.ttf"]:
+        if Path(p).exists():
+            dirs.append(Path(p).parent)
+
+    for d in dirs:
+        if not d.exists():
+            continue
         files = []
-        for pattern in ("*.ttf", "*.TTF", "*.otf", "*.OTF", "*.ttc", "*.TTC"):
-            files.extend(d.glob(pattern))
+        for pat in ("*.ttf","*.TTF","*.otf","*.OTF","*.ttc","*.TTC"):
+            files.extend(d.glob(pat))
         for f in sorted(files):
-            fonts[f.stem.lower()] = str(f)
+            stem = f.stem.lower()
+            all_fonts[stem] = str(f)
             try:
-                family = ImageFont.truetype(str(f), 16).getname()[0].lower()
-                fonts.setdefault(family, str(f))
+                fo = ImageFont.truetype(str(f), 16)
+                family, subfamily = fo.getname()
+                family    = family    or ""
+                subfamily = subfamily or ""
+                fam_lower = family.lower()
+                all_fonts.setdefault(fam_lower, str(f))
+                if (any(t in fam_lower for t in _FONT_SKIP_TERMS) or
+                        any(t in stem for t in _FONT_SKIP_TERMS)):
+                    continue
+                if subfamily.lower() in _REGULAR_SUBFAMILIES:
+                    key = fam_lower
+                    if key not in seen_lower:
+                        seen_lower.add(key)
+                        display[family] = str(f)
             except Exception:
                 pass
-    for path in [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/System/Library/Fonts/Supplemental/Arial.ttf",
-    ]:
-        p = Path(path)
-        if p.exists():
-            fonts[p.stem.lower()] = str(p)
-    return fonts
+    return all_fonts, display
 
-SYSTEM_FONTS = _scan_win_fonts()
+SYSTEM_FONTS, _FONT_DISPLAY = _scan_font_dirs()
+# Flat sorted list of clean display names (for ordered_fonts / comboboxes)
+DISPLAY_FONTS = sorted(_FONT_DISPLAY.keys(), key=str.lower)
 
 _FONT_MATRIX = {
-    (False, False): ["segoeui",   "arial",   "calibri",  "dejavu sans"],
-    (True,  False): ["seguisb",   "arialbd", "calibrib", "seguibl"],
-    (False, True):  ["segoeuii",  "ariali",  "calibrii"],
-    (True,  True):  ["seguisbi",  "arialbi", "calibriz"],
+    (False, False): ["segoeui",   "segoe ui",  "arial",   "calibri",  "dejavu sans"],
+    (True,  False): ["seguisb",   "arialbd",   "calibrib","seguibl"],
+    (False, True):  ["segoeuii",  "ariali",    "calibrii"],
+    (True,  True):  ["seguisbi",  "arialbi",   "calibriz"],
 }
 
 def find_font_path(bold=False, italic=False):
-    for stem in _FONT_MATRIX.get((bold, italic), ["segoeui"]):
+    for stem in _FONT_MATRIX.get((bold, italic), ["segoeui", "segoe ui"]):
         if stem in SYSTEM_FONTS:
             return SYSTEM_FONTS[stem]
     return next(iter(SYSTEM_FONTS.values()), None)
@@ -135,11 +175,6 @@ FONT_REG        = find_font_path()
 FONT_BOLD       = find_font_path(bold=True)  or FONT_REG
 FONT_ITALIC     = find_font_path(italic=True) or FONT_REG
 FONT_BOLD_ITALIC= find_font_path(bold=True, italic=True) or FONT_BOLD
-
-DISPLAY_FONTS = sorted({
-    k for k in SYSTEM_FONTS
-    if not any(x in k for x in ["symbol","wingdings","marlett","webdings","mt extra"])
-})
 _HEBREW_FONT_CACHE = {}
 
 HEBREW_FONT_HINTS = (
@@ -265,7 +300,26 @@ def resolve_font(stem_display, bold=False, italic=False):
             return SYSTEM_FONTS[c]
     return find_font_path(bold, italic)
 
-# ── image helpers ─────────────────────────────────────────────────────────────
+# ?? image helpers ?????????????????????????????????????????????????????????????
+def _load_svg_as_pil(path, size=(1748, 2480)):
+    """Render an SVG file to a PIL RGBA image. Requires cairosvg; falls back to placeholder."""
+    if _cairosvg is not None:
+        try:
+            png_bytes = _cairosvg.svg2png(
+                url=str(path),
+                output_width=size[0], output_height=size[1])
+            import io
+            return Image.open(io.BytesIO(png_bytes)).convert("RGBA")
+        except Exception:
+            pass
+    # Fallback: grey placeholder with SVG label
+    img = Image.new("RGBA", (400, 400), (180, 180, 180, 255))
+    try:
+        ImageDraw.Draw(img).text((20, 180), "SVG ? install cairosvg", fill=(60, 60, 60, 255))
+    except Exception:
+        pass
+    return img
+
 def cm_to_px(cm, dpi=300):
     return int(round(cm / 2.54 * dpi))
 
@@ -275,11 +329,19 @@ def hex_to_rgb(hex_color):
     try:    return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
     except: return (255, 255, 255)
 
+def has_hebrew(text):
+    return any("\u0590" <= c <= "\u05ff" for c in str(text or ""))
+
 def bidi_text(text):
     if get_display:
-        try:    return get_display(text)
-        except: return text
-    return text[::-1] if any("֐" <= c <= "׿" for c in text) else text
+        try:
+            return get_display(text, base_dir="R" if has_hebrew(text) else None)
+        except TypeError:
+            try:    return get_display(text)
+            except Exception: return text
+        except Exception:
+            return text
+    return text
 
 def wrap_text(draw, text, font, max_width):
     words = text.split()
@@ -326,7 +388,7 @@ def fit_text(draw, text, box, font_path, max_size, min_size=20, line_spacing=1.2
     return font, lines, int(min_size * line_spacing)
 
 
-# ── QuoteRepository (inline, mirrors hadish_blessings_tool) ──────────────────
+# ?? QuoteRepository (inline, mirrors hadish_blessings_tool) ??????????????????
 class QuoteRepository:
     def __init__(self, data_path=None):
         self.data_path = Path(data_path) if data_path else TOOL_DIR / "data" / "sources_quotes.json"
@@ -372,7 +434,7 @@ class QuoteRepository:
         return results
 
 
-# ── EmbeddedBlessingWidget ────────────────────────────────────────────────────
+# ?? EmbeddedBlessingWidget ????????????????????????????????????????????????????
 class EmbeddedBlessingWidget(tk.Frame):
     """Full blessing-tool UI embedded in the Wizard's step 4."""
 
@@ -392,7 +454,7 @@ class EmbeddedBlessingWidget(tk.Frame):
         self._build()
         self.switch_mode("blessings")
 
-    # ── favorites helpers ─────────────────────────────────────────────────────
+    # ?? favorites helpers ?????????????????????????????????????????????????????
     def _load_favs(self, path):
         if path.exists():
             try: return set(json.loads(path.read_text(encoding="utf-8")))
@@ -406,7 +468,7 @@ class EmbeddedBlessingWidget(tk.Frame):
                 path.write_text(json.dumps(sorted(data), ensure_ascii=False, indent=2), encoding="utf-8")
             except Exception: pass
 
-    # ── UI build ──────────────────────────────────────────────────────────────
+    # ?? UI build ??????????????????????????????????????????????????????????????
     def _build(self):
         # header
         hdr = tk.Frame(self, bg="#1E3A6E", height=56)
@@ -434,9 +496,9 @@ class EmbeddedBlessingWidget(tk.Frame):
                           padx=13, pady=8, font=("Segoe UI", 10, "bold"), cursor="hand2")
             b.pack(side="right", padx=5, pady=7)
             return b
-        self._btn_use    = abtn("✅ הוסף לעיצוב",  self._use,        "#16A34A")
-        self._btn_copy   = abtn("📋 העתק",          self._copy,       "#2563EB")
-        self._btn_fav    = abtn("⭐ מועדף",          self._toggle_fav, "#FACC15", "#0B1628")
+        self._btn_use    = abtn("+ הוסף לעיצוב",  self._use,        "#16A34A")
+        self._btn_copy   = abtn("העתק",          self._copy,       "#2563EB")
+        self._btn_fav    = abtn("☆ מועדף",          self._toggle_fav, "#FACC15", "#0B1628")
         self._btn_random = abtn("🎲 אקראי",          self._random,     "#7C3AED")
         tk.Label(abar, text="לחץ כפול על ברכה → הוסף לעיצוב", bg="white",
                  fg="#64748B", font=("Segoe UI", 9)).pack(side="left", padx=12)
@@ -466,7 +528,7 @@ class EmbeddedBlessingWidget(tk.Frame):
         cols = ("fav","text","main","sub","product","style")
         self.tree = ttk.Treeview(lf, columns=cols, show="headings", selectmode="browse")
         for col, text, w, anc, stretch in [
-            ("fav","★",44,"center",False), ("text","הטקסט",490,"e",True),
+            ("fav","?",44,"center",False), ("text","הטקסט",490,"e",True),
             ("main","אירוע",115,"center",False), ("sub","למי",138,"center",False),
             ("product","מוצר",105,"center",False), ("style","סגנון",148,"center",False),
         ]:
@@ -546,7 +608,7 @@ class EmbeddedBlessingWidget(tk.Frame):
         for key, color in RECIPIENT_COLORS.items():
             self.tree.tag_configure(f"r_{key}", background=color, foreground="#0F172A")
 
-    # ── mode ──────────────────────────────────────────────────────────────────
+    # ?? mode ??????????????????????????????????????????????????????????????????
     def switch_mode(self, mode):
         self.mode = mode
         self.selected_item = None
@@ -589,7 +651,7 @@ class EmbeddedBlessingWidget(tk.Frame):
         self.sv_search.set(""); self.sv_f1.set("הכל"); self.sv_f2.set("הכל")
         self.sv_prod.set("הכל"); self.sv_style.set("הכל")
 
-    # ── data refresh ──────────────────────────────────────────────────────────
+    # ?? data refresh ??????????????????????????????????????????????????????????
     def refresh(self):
         q, e, r, p, s = (self.sv_search.get(), self.sv_f1.get(), self.sv_f2.get(),
                           self.sv_prod.get(), self.sv_style.get())
@@ -602,7 +664,7 @@ class EmbeddedBlessingWidget(tk.Frame):
         self.tree.delete(*self.tree.get_children())
         self._configure_tags()
         for i, item in enumerate(self.filtered):
-            fav   = "★" if item.get("favorite") else "☆"
+            fav   = "?" if item.get("favorite") else "?"
             text  = item.get("text","")
             short = text if len(text) <= 120 else text[:117] + "..."
             sty   = ", ".join(item.get("style",[])[:3])
@@ -635,9 +697,9 @@ class EmbeddedBlessingWidget(tk.Frame):
         if not sel: return
         self.selected_item = self.filtered[int(sel[0])]
         if self.mode == "blessings":
-            meta = f"{self.selected_item.get('event','')} • {self.selected_item.get('recipient','')} • {self.selected_item.get('product','')}"
+            meta = f"{self.selected_item.get('event','')} ? {self.selected_item.get('recipient','')} ? {self.selected_item.get('product','')}"
         else:
-            meta = f"{self.selected_item.get('category','')} • {self.selected_item.get('source','')}"
+            meta = f"{self.selected_item.get('category','')} ? {self.selected_item.get('source','')}"
         self._meta.config(text=meta)
         self._prev_txt.configure(state="normal"); self._prev_txt.delete("1.0","end")
         self._prev_txt.insert("1.0", self.selected_item.get("text",""))
@@ -666,7 +728,7 @@ class EmbeddedBlessingWidget(tk.Frame):
         if not self.selected_item: return
         try:
             self.clipboard_clear(); self.clipboard_append(self.selected_item.get("text",""))
-            self._status.config(text="הועתק ללוח ✅")
+            self._status.config(text="הועתק ללוח ?")
         except Exception: pass
 
     def _toggle_fav(self):
@@ -683,7 +745,7 @@ class EmbeddedBlessingWidget(tk.Frame):
         self.tree.selection_set(str(idx)); self.tree.see(str(idx)); self._on_sel()
 
 
-# ── Collapsible panel ─────────────────────────────────────────────────────────
+# ?? Collapsible panel ?????????????????????????????????????????????????????????
 class Tooltip:
     def __init__(self, widget, text, delay=450):
         self.widget = widget
@@ -732,7 +794,7 @@ class Collapsible:
         self.open  = tk.BooleanVar(value=start_open)
         self.title = title
         self.bg    = bg
-        btn_text = ("▼  " if start_open else "▶  ") + title
+        btn_text = ("?  " if start_open else "?  ") + title
         self.btn = tk.Button(self.frame, text=btn_text, command=self.toggle,
                              bg="#233660", fg=BRAND["gold"], bd=0, anchor="e",
                              font=("Segoe UI", 10, "bold"), padx=12, pady=7, cursor="hand2")
@@ -743,13 +805,210 @@ class Collapsible:
     def toggle(self):
         if self.open.get():
             self.body.pack_forget(); self.open.set(False)
-            self.btn.configure(text="▶  " + self.title)
+            self.btn.configure(text="?  " + self.title)
         else:
             self.body.pack(fill="x"); self.open.set(True)
-            self.btn.configure(text="▼  " + self.title)
+            self.btn.configure(text="?  " + self.title)
 
 
-# ── Main Application ──────────────────────────────────────────────────────────
+# ?? Main Application ??????????????????????????????????????????????????????????
+class NativeRtlText(tk.Frame):
+    """Windows RichEdit wrapper: logical Unicode storage with native RTL editing."""
+
+    _loaded = False
+
+    def __init__(self, parent, height=6, font=("Segoe UI", 11), bg="#142040", fg="#F1F5F9",
+                 insertbackground="white", **kwargs):
+        super().__init__(parent, bg=bg, highlightthickness=0, bd=0)
+        self._font_spec = font
+        self._bg = bg
+        self._fg = fg
+        self._hwnd = None
+        self._font_handle = None
+        self._callbacks = {}
+        self._last_text = ""
+        self._last_focus = False
+        self.configure(height=max(84, int(height * 25)))
+        self.bind("<Configure>", self._on_configure, add="+")
+        self.after_idle(self._create)
+
+    @staticmethod
+    def available():
+        return sys.platform.startswith("win")
+
+    def _create(self):
+        if self._hwnd or not self.winfo_exists():
+            return
+        try:
+            if not NativeRtlText._loaded:
+                ctypes.windll.kernel32.LoadLibraryW("Msftedit.dll")
+                NativeRtlText._loaded = True
+            style = 0x40000000 | 0x10000000 | 0x00200000 | 0x0004 | 0x0040 | 0x1000 | 0x0100 | 0x0002
+            self._hwnd = ctypes.windll.user32.CreateWindowExW(
+                0x00002000, "RICHEDIT50W", "", style,
+                0, 0, max(1, self.winfo_width()), max(1, self.winfo_height()),
+                self.winfo_id(), 0, 0, None)
+            if not self._hwnd:
+                raise OSError("CreateWindowExW(RICHEDIT50W) failed")
+            self._apply_font()
+            self._apply_colors()
+            self._apply_rtl_paragraph()
+            self._poll()
+        except Exception:
+            self._hwnd = None
+
+    def _apply_font(self):
+        if not self._hwnd:
+            return
+        family = self._font_spec[0] if self._font_spec else "Segoe UI"
+        size = int(self._font_spec[1]) if len(self._font_spec) > 1 else 11
+        height = -int(size * self.winfo_fpixels("1p"))
+        self._font_handle = ctypes.windll.gdi32.CreateFontW(
+            height, 0, 0, 0, 400, 0, 0, 0, 177, 0, 0, 5, 0, family)
+        ctypes.windll.user32.SendMessageW(self._hwnd, 0x0030, self._font_handle, True)
+
+    def _colorref(self, hex_color):
+        r, g, b = hex_to_rgb(hex_color)
+        return r | (g << 8) | (b << 16)
+
+    def _apply_colors(self):
+        if self._hwnd:
+            ctypes.windll.user32.SendMessageW(self._hwnd, 0x0443, 0, self._colorref(self._bg))
+            self._apply_char_format(0)
+
+    def _apply_char_format(self, scope=0):
+        if not self._hwnd:
+            return
+
+        class CHARFORMAT2(ctypes.Structure):
+            _fields_ = [
+                ("cbSize", ctypes.c_uint), ("dwMask", ctypes.c_uint), ("dwEffects", ctypes.c_uint),
+                ("yHeight", ctypes.c_long), ("yOffset", ctypes.c_long), ("crTextColor", ctypes.c_uint),
+                ("bCharSet", ctypes.c_ubyte), ("bPitchAndFamily", ctypes.c_ubyte),
+                ("szFaceName", ctypes.c_wchar * 32), ("wWeight", ctypes.c_ushort),
+                ("sSpacing", ctypes.c_short), ("crBackColor", ctypes.c_uint), ("lcid", ctypes.c_uint),
+                ("dwReserved", ctypes.c_uint), ("sStyle", ctypes.c_short), ("wKerning", ctypes.c_ushort),
+                ("bUnderlineType", ctypes.c_ubyte), ("bAnimation", ctypes.c_ubyte),
+                ("bRevAuthor", ctypes.c_ubyte), ("bReserved1", ctypes.c_ubyte),
+            ]
+
+        cf = CHARFORMAT2()
+        cf.cbSize = ctypes.sizeof(CHARFORMAT2)
+        cf.dwMask = 0x40000000
+        cf.crTextColor = self._colorref(self._fg)
+        ctypes.windll.user32.SendMessageW(self._hwnd, 0x0444, scope, ctypes.byref(cf))
+
+    def _apply_rtl_paragraph(self):
+        if not self._hwnd:
+            return
+
+        class PARAFORMAT2(ctypes.Structure):
+            _fields_ = [
+                ("cbSize", ctypes.c_uint), ("dwMask", ctypes.c_uint),
+                ("wNumbering", ctypes.c_ushort), ("wReserved", ctypes.c_ushort),
+                ("dxStartIndent", ctypes.c_long), ("dxRightIndent", ctypes.c_long),
+                ("dxOffset", ctypes.c_long), ("wAlignment", ctypes.c_ushort),
+                ("cTabCount", ctypes.c_short), ("rgxTabs", ctypes.c_long * 32),
+                ("dySpaceBefore", ctypes.c_long), ("dySpaceAfter", ctypes.c_long),
+                ("dyLineSpacing", ctypes.c_long), ("sStyle", ctypes.c_short),
+                ("bLineSpacingRule", ctypes.c_ubyte), ("bOutlineLevel", ctypes.c_ubyte),
+                ("wShadingWeight", ctypes.c_ushort), ("wShadingStyle", ctypes.c_ushort),
+                ("wNumberingStart", ctypes.c_ushort), ("wNumberingStyle", ctypes.c_ushort),
+                ("wNumberingTab", ctypes.c_ushort), ("wBorderSpace", ctypes.c_ushort),
+                ("wBorderWidth", ctypes.c_ushort), ("wBorders", ctypes.c_ushort),
+            ]
+
+        pf = PARAFORMAT2()
+        pf.cbSize = ctypes.sizeof(PARAFORMAT2)
+        pf.dwMask = 0x00000008
+        pf.wAlignment = 3
+        ctypes.windll.user32.SendMessageW(self._hwnd, 0x0447, 0, ctypes.byref(pf))
+
+    def _on_configure(self, _event=None):
+        if self._hwnd:
+            ctypes.windll.user32.MoveWindow(
+                self._hwnd, 0, 0, max(1, self.winfo_width()), max(1, self.winfo_height()), True)
+
+    def _poll(self):
+        if not self.winfo_exists() or not self._hwnd:
+            return
+        text = self.get("1.0", "end")
+        focused = ctypes.windll.user32.GetFocus() == self._hwnd
+        if focused and not self._last_focus:
+            self._emit("<FocusIn>")
+        if text != self._last_text:
+            self._last_text = text
+            self._apply_rtl_paragraph()
+            self._emit("<KeyRelease>")
+        self._last_focus = focused
+        self.after(90, self._poll)
+
+    def _emit(self, sequence):
+        event = type("Event", (), {"widget": self})()
+        for callback in self._callbacks.get(sequence, []):
+            callback(event)
+
+    def bind(self, sequence=None, func=None, add=None):
+        if sequence and func and sequence in {"<KeyRelease>", "<FocusIn>", "<<Paste>>"}:
+            if add == "+":
+                self._callbacks.setdefault(sequence, []).append(func)
+            else:
+                self._callbacks[sequence] = [func]
+            return ""
+        return super().bind(sequence, func, add)
+
+    def focus_set(self):
+        if self._hwnd:
+            ctypes.windll.user32.SetFocus(self._hwnd)
+        else:
+            super().focus_set()
+
+    def get(self, start=None, end=None):
+        if not self._hwnd:
+            return self._last_text
+        length = ctypes.windll.user32.SendMessageW(self._hwnd, 0x000E, 0, 0)
+        buf = ctypes.create_unicode_buffer(length + 1)
+        ctypes.windll.user32.SendMessageW(self._hwnd, 0x000D, length + 1, buf)
+        return buf.value.replace("\r\n", "\n")
+
+    def _set_text(self, text):
+        text = str(text or "")
+        if not self._hwnd:
+            self._last_text = text
+            self.after_idle(lambda: self._set_text(text))
+            return
+        ctypes.windll.user32.SendMessageW(self._hwnd, 0x000C, 0, text.replace("\n", "\r\n"))
+        self._apply_char_format(4)
+        self._last_text = self.get("1.0", "end")
+        self._apply_rtl_paragraph()
+
+    def delete(self, start, end=None):
+        self._set_text("")
+
+    def insert(self, index, text):
+        text = str(text or "")
+        if not self._hwnd:
+            self._last_text = text + self._last_text if index in ("1.0", 0) else self._last_text + text
+            self.after_idle(lambda: self._set_text(self._last_text))
+            return
+        if index in ("1.0", 0):
+            ctypes.windll.user32.SendMessageW(self._hwnd, 0x00B1, 0, 0)
+        ctypes.windll.user32.SendMessageW(self._hwnd, 0x00C2, True, text.replace("\n", "\r\n"))
+        self._apply_char_format(4)
+        self._last_text = self.get("1.0", "end")
+        self._apply_rtl_paragraph()
+
+    def select_range(self, start, end):
+        if self._hwnd:
+            end_pos = -1 if end == "end" else int(end)
+            ctypes.windll.user32.SendMessageW(self._hwnd, 0x00B1, int(start), end_pos)
+
+    def icursor(self, index):
+        if self._hwnd:
+            pos = -1 if index == "end" else int(index)
+            ctypes.windll.user32.SendMessageW(self._hwnd, 0x00B1, pos, pos)
+
+
 class BlessingApp:
     def __init__(self, root):
         self.root = root
@@ -757,7 +1016,7 @@ class BlessingApp:
         self._settings_cache = self._load_settings()
         set_brand_theme(self._settings_cache.get("theme", "dark"))
         self._show_splash()
-        # Respect Windows taskbar — cap height to screen minus ~70px
+        # Respect Windows taskbar ? cap height to screen minus ~70px
         sw = root.winfo_screenwidth(); sh = root.winfo_screenheight()
         win_w = min(1400, sw); win_h = min(860, sh - 70)
         self.root.geometry(f"{win_w}x{win_h}")
@@ -771,7 +1030,7 @@ class BlessingApp:
         self._render_after = None
         self._image_cache = {}
         self._font_combo_widgets = []
-        # logos (PhotoImage must stay referenced — store on self)
+        # logos (PhotoImage must stay referenced ? store on self)
         self._logo_nav     = None  # nav bar   ~44 px tall
         self._logo_preview = None  # preview header ~36 px tall
         self._snackbar_after = None
@@ -781,7 +1040,7 @@ class BlessingApp:
         self.build_ui()
         self.show_step("size")
 
-    # ── state ─────────────────────────────────────────────────────────────────
+    # ?? state ?????????????????????????????????????????????????????????????????
     def _show_splash(self):
         splash = tk.Toplevel(self.root)
         splash.overrideredirect(True)
@@ -821,6 +1080,8 @@ class BlessingApp:
             "font_favorites": sorted(getattr(self, "font_favorites", set())),
             "style_presets": getattr(self, "style_presets", {}),
             "theme": getattr(self, "theme_mode", tk.StringVar(value="dark")).get(),
+            "last_body_text": getattr(self, "_text_cache", ""),
+            "recent_colors": getattr(self, "_recent_colors", []),
         }
         try:
             SETTINGS_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -861,6 +1122,7 @@ class BlessingApp:
         self.card_opacity = tk.IntVar(value=30)
         # title style
         self.title_color  = tk.StringVar(value="#144C8A")
+        self.title_opacity = tk.IntVar(value=100)
         self.title_size   = tk.IntVar(value=72)
         self.title_shadow = tk.BooleanVar(value=False)
         self.title_shadow_color = tk.StringVar(value="#000000")
@@ -868,6 +1130,8 @@ class BlessingApp:
         self.title_shadow_angle = tk.IntVar(value=45)
         self.title_shadow_opacity = tk.IntVar(value=38)
         self.title_italic = tk.BooleanVar(value=False)
+        self.title_bold   = tk.BooleanVar(value=True)
+        self.title_align  = tk.StringVar(value="center")
         self.title_gradient = tk.BooleanVar(value=False)
         self.title_gradient_a = tk.StringVar(value="#144C8A")
         self.title_gradient_b = tk.StringVar(value="#F59E0B")
@@ -877,17 +1141,19 @@ class BlessingApp:
         self.title_stroke_color = tk.StringVar(value="#FFFFFF")
         self.title_stroke_width = tk.IntVar(value=0)
         self.title_preset = tk.StringVar(value="נקי כחול")
-        self.title_font   = tk.StringVar(value="segoeui")
+        self.title_font   = tk.StringVar(value="Segoe UI")
         self.title_x_off  = tk.IntVar(value=0)
         self.title_y_off  = tk.IntVar(value=0)
         # body style
         self.body_color   = tk.StringVar(value="#1E293B")
+        self.body_opacity = tk.IntVar(value=100)
         self.body_size    = tk.IntVar(value=54)
         self.body_shadow  = tk.BooleanVar(value=False)
         self.body_shadow_color = tk.StringVar(value="#000000")
         self.body_shadow_size = tk.IntVar(value=4)
         self.body_shadow_angle = tk.IntVar(value=45)
         self.body_shadow_opacity = tk.IntVar(value=32)
+        self.body_bold    = tk.BooleanVar(value=False)
         self.body_italic  = tk.BooleanVar(value=False)
         self.body_gradient = tk.BooleanVar(value=False)
         self.body_gradient_a = tk.StringVar(value="#1E293B")
@@ -898,15 +1164,21 @@ class BlessingApp:
         self.body_stroke_color = tk.StringVar(value="#FFFFFF")
         self.body_stroke_width = tk.IntVar(value=0)
         self.body_line_spacing = tk.IntVar(value=122)
+        self.body_letter_spacing = tk.IntVar(value=0)
+        self.body_align = tk.StringVar(value="center")
         self.body_preset  = tk.StringVar(value="נקי כהה")
-        self.body_font    = tk.StringVar(value="segoeui")
+        self.body_font    = tk.StringVar(value="Segoe UI")
         self.body_x_off   = tk.IntVar(value=0)
         self.body_y_off   = tk.IntVar(value=0)
         self.third_enabled = tk.BooleanVar(value=False)
         self.third_text    = tk.StringVar(value="")
         self.third_color   = tk.StringVar(value="#1E293B")
+        self.third_opacity = tk.IntVar(value=100)
         self.third_size    = tk.IntVar(value=38)
-        self.third_font    = tk.StringVar(value="segoeui")
+        self.third_font    = tk.StringVar(value="Segoe UI")
+        self.third_bold    = tk.BooleanVar(value=False)
+        self.third_italic  = tk.BooleanVar(value=False)
+        self.third_align   = tk.StringVar(value="center")
         self.third_gradient = tk.BooleanVar(value=False)
         self.third_gradient_a = tk.StringVar(value="#1E293B")
         self.third_gradient_b = tk.StringVar(value="#F59E0B")
@@ -923,9 +1195,13 @@ class BlessingApp:
         self.third_x_off  = tk.IntVar(value=0)
         self.third_y_off  = tk.IntVar(value=0)
         self._overflow_notice_after = None
-        self._text_cache  = ""
+        self._text_cache  = settings.get("last_body_text", "")
+        self._recent_colors = list(settings.get("recent_colors", []))[:18]
+        self._active_text_target = "body"
+        self._editor_text_target = "body"
+        self._tb_syncing = False
 
-    # ── styles ────────────────────────────────────────────────────────────────
+    # ?? styles ????????????????????????????????????????????????????????????????
     def build_style(self):
         s = ttk.Style(); s.theme_use("clam")
         bg = BRAND["bg"]; panel = BRAND["panel"]; surface = BRAND["surface"]
@@ -941,7 +1217,7 @@ class BlessingApp:
         s.configure("TCombobox",     padding=5)
         s.configure("TScrollbar",    background=BRAND["border"])
 
-    # ── menu ──────────────────────────────────────────────────────────────────
+    # ?? menu ??????????????????????????????????????????????????????????????????
     def build_menu(self):
         menubar    = tk.Menu(self.root)
         steps_menu = tk.Menu(menubar, tearoff=0, bg=BRAND["surface"], fg=BRAND["text"])
@@ -959,15 +1235,15 @@ class BlessingApp:
         menubar.add_cascade(label="View", menu=view_menu)
         self.root.config(menu=menubar)
 
-    # ── UI skeleton ───────────────────────────────────────────────────────────
+    # ?? UI skeleton ???????????????????????????????????????????????????????????
     def build_ui(self):
-        # ── persistent nav bar (bottom, always visible) ──────────────────────
+        # ?? persistent nav bar (bottom, always visible) ??????????????????????
         self.nav_bar = tk.Frame(self.root, bg=BRAND["bg"], height=62)
         self.nav_bar.pack(side="bottom", fill="x", padx=14, pady=(4,12))
         self.nav_bar.pack_propagate(False)
 
         self.back_btn = tk.Button(
-            self.nav_bar, text="⬅  חזור", command=self.prev_step,
+            self.nav_bar, text="ג¬…  חזור", command=self.prev_step,
             bg=BRAND["red"], fg="white", activebackground="#B91C1C",
             font=("Segoe UI Semibold", 13), padx=22, pady=10, bd=0, cursor="hand2")
         self.back_btn.pack(side="left", padx=4, pady=6)
@@ -982,7 +1258,7 @@ class BlessingApp:
                                      fg=BRAND["muted"], font=("Segoe UI", 10))
         self.progress_lbl.pack(side="left", padx=16)
         self.theme_btn = tk.Button(
-            self.nav_bar, text=("☀" if self.theme_mode.get() == "dark" else "🌙"),
+            self.nav_bar, text=("?" if self.theme_mode.get() == "dark" else "🌙"),
             command=self.toggle_theme, bg=BRAND["surface"], fg=BRAND["text"],
             bd=0, padx=10, pady=6, cursor="hand2", font=("Segoe UI", 12, "bold"))
         self.theme_btn.pack(side="left", padx=4, pady=8)
@@ -1003,13 +1279,13 @@ class BlessingApp:
             lbl.pack(side="left", padx=3)
             self._dot_labels.append(lbl)
 
-        # logo — centered in nav bar
+        # logo ? centered in nav bar
         self._logo_nav = _make_logo_tk(46)
         if self._logo_nav:
             tk.Label(self.nav_bar, image=self._logo_nav, bg=BRAND["bg"],
                      cursor="hand2").pack(side="left", padx=24)
 
-        # ── content area ─────────────────────────────────────────────────────
+        # ?? content area ?????????????????????????????????????????????????????
         self.content = tk.Frame(self.root, bg=BRAND["bg"])
         self.content.pack(fill="both", expand=True, padx=14, pady=(12,4))
 
@@ -1023,16 +1299,23 @@ class BlessingApp:
         self.right = tk.Frame(self.normal_view, bg=BRAND["panel"])
         self.right.pack(side="right", fill="both", expand=True)
 
+        # right panel uses grid so topbar can be inserted between header and preview
+        self.right.grid_columnconfigure(0, weight=1)
+        self.right.grid_rowconfigure(2, weight=1)
+
         preview_hdr = tk.Frame(self.right, bg=BRAND["panel"])
-        preview_hdr.pack(fill="x", padx=18, pady=(14,4))
+        preview_hdr.grid(row=0, column=0, sticky="ew", padx=18, pady=(14,4))
         tk.Label(preview_hdr, text="תצוגה מקדימה", bg=BRAND["panel"],
                  fg=BRAND["gold"], font=("Segoe UI Semibold", 14)).pack(side="right")
         self._logo_preview = _make_logo_tk(36)
         if self._logo_preview:
             tk.Label(preview_hdr, image=self._logo_preview,
                      bg=BRAND["panel"]).pack(side="left", padx=4)
+
+        self._build_text_topbar()  # builds row=1 (hidden until text step)
+
         self.preview_label = tk.Label(self.right, text="", bg=BRAND["panel"])
-        self.preview_label.pack(fill="both", expand=True, padx=16, pady=12)
+        self.preview_label.grid(row=2, column=0, sticky="nsew", padx=16, pady=12)
         self.preview_label.bind("<ButtonPress-1>", self._preview_drag_start)
         self.preview_label.bind("<B1-Motion>", self._preview_drag_move)
         self.preview_label.bind("<ButtonRelease-1>", self._preview_drag_end)
@@ -1071,7 +1354,7 @@ class BlessingApp:
             widget.yview_scroll(int(-1*(event.delta/120)), "units")
         widget.bind_all("<MouseWheel>", on_wheel)
 
-    # ── step routing ──────────────────────────────────────────────────────────
+    # ?? step routing ??????????????????????????????????????????????????????????
     def clear_step(self):
         for w in self.step_area.winfo_children(): w.destroy()
 
@@ -1084,10 +1367,19 @@ class BlessingApp:
         self._update_progress_dots(idx)
 
         if step == "blessings":
+            self._hide_text_topbar()
             self._enter_blessing_fullscreen()
         else:
             self._exit_blessing_fullscreen()
             self.clear_step()
+            if step != "text":
+                self.left.configure(width=516, bg=BRAND["panel"])
+                self.right.configure(bg=BRAND["panel"])
+                self._left_canvas.configure(bg=BRAND["panel"])
+                self.step_area.configure(bg=BRAND["panel"])
+                self.preview_label.configure(bg=BRAND["panel"])
+                if not self._left_vsb.winfo_ismapped():
+                    self._left_vsb.pack(side="right", fill="y")
             if   step == "size":       self.build_size_step()
             elif step == "background": self.build_background_step()
             elif step == "frame":      self.build_frame_step()
@@ -1097,8 +1389,11 @@ class BlessingApp:
             self.render_preview()
             self._animate_step_in()
             if step == "text":
+                self._show_text_topbar()
                 # belt-and-suspenders: re-render once widgets are fully settled
                 self.root.after(80, self.render_preview)
+            else:
+                self._hide_text_topbar()
 
         self.back_btn.configure(state=("disabled" if idx == 1 else "normal"))
         self.next_btn.configure(text=("יצוא PNG  ➜" if step == "text" else "הבא  ➜"))
@@ -1174,14 +1469,62 @@ class BlessingApp:
             self.normal_view.pack(fill="both", expand=True)
 
     def _on_blessing_chosen(self, text):
-        self._text_cache = text
+        self._set_body_text(text)
         self.show_step("text")
+        self.root.after(120, lambda t=text: self._set_body_text(t, update_widget=True))
+
+    def _set_body_text(self, text, update_widget=False):
+        self._text_cache = str(text or "")
+        self._save_settings()
+        if update_widget and hasattr(self, "text_box") and self.text_box.winfo_exists():
+            try:
+                self.text_box.delete("1.0", "end")
+                self.text_box.insert("1.0", self._text_cache)
+            except Exception:
+                pass
+            self.render_preview()
+
+    def _get_target_text(self, target):
+        if target == "title":
+            return self.title_text.get()
+        if target == "third":
+            return self.third_text.get()
+        return self._text_cache
+
+    def _set_target_text(self, target, text):
+        text = str(text or "")
+        if target == "title":
+            self.title_text.set(text)
+        elif target == "third":
+            self.third_enabled.set(bool(text.strip()) or self.third_enabled.get())
+            self.third_text.set(text)
+        else:
+            self._text_cache = text
+            self._save_settings()
+
+    def _save_editor_to_target(self):
+        if hasattr(self, "text_box") and self.text_box.winfo_exists():
+            self._set_target_text(getattr(self, "_editor_text_target", "body"),
+                                  self.text_box.get("1.0", "end"))
+
+    def _load_target_into_editor(self, target):
+        self._save_editor_to_target()
+        self._editor_text_target = target
+        self._active_text_target = target
+        if target == "third":
+            self.third_enabled.set(True)
+        if hasattr(self, "text_box") and self.text_box.winfo_exists():
+            self.text_box.delete("1.0", "end")
+            self.text_box.insert("1.0", self._get_target_text(target))
+        self._tb_set_target(target)
+        self._refresh_text_type_buttons()
+        self.render_preview()
 
     def next_step(self):
         if self.current_step == "text":
             self.export_png(); return
         if self.current_step == "blessings":
-            # user pressed Next without picking — go to text with whatever is cached
+            # user pressed Next without picking ? go to text with whatever is cached
             self.show_step("text"); return
         idx = self.step_order.index(self.current_step)
         self.show_step(self.step_order[idx + 1])
@@ -1190,7 +1533,7 @@ class BlessingApp:
         idx = self.step_order.index(self.current_step)
         if idx > 0: self.show_step(self.step_order[idx - 1])
 
-    # ── Step 1: size ──────────────────────────────────────────────────────────
+    # ?? Step 1: size ??????????????????????????????????????????????????????????
     def build_size_step(self):
         self._section_hint("בחר/י את גודל הברכה. ניתן לשנות בכל עת.")
         for key, data in PRODUCT_PRESETS_CM.items():
@@ -1257,7 +1600,7 @@ class BlessingApp:
         except Exception:
             self.notify("לא הצלחתי לקרוא את המידה")
 
-    # ── Step 2: background ────────────────────────────────────────────────────
+    # ?? Step 2: background ????????????????????????????????????????????????????
     def build_background_step(self):
         self._section_hint("בחר/י רקע. התצוגה מתעדכנת מיד.")
         upload = tk.Button(self.step_area, text="העלה רקע", command=self.upload_background,
@@ -1270,19 +1613,25 @@ class BlessingApp:
     def upload_background(self):
         path = filedialog.askopenfilename(
             title="בחר רקע",
-            filetypes=[("Images", "*.png;*.jpg;*.jpeg;*.webp;*.bmp"), ("All files", "*.*")]
+            filetypes=[("Images", "*.png;*.jpg;*.jpeg;*.webp;*.bmp;*.svg"), ("All files", "*.*")]
         )
         if not path:
             return
         try:
             src = Path(path)
             stem = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in src.stem).strip("_") or "uploaded_bg"
-            dest = BG_DIR / f"{stem}.png"
+            is_svg = src.suffix.lower() == ".svg"
+            ext = ".png"  # always save as PNG for full support
+            dest = BG_DIR / f"{stem}{ext}"
             i = 2
             while dest.exists():
-                dest = BG_DIR / f"{stem}_{i}.png"
+                dest = BG_DIR / f"{stem}_{i}{ext}"
                 i += 1
-            img = Image.open(src).convert("RGB")
+            if is_svg:
+                img = _load_svg_as_pil(src)
+            else:
+                raw = Image.open(src)
+                img = raw.convert("RGBA") if raw.mode in ("RGBA","LA","P") else raw.convert("RGB").convert("RGBA")
             img.save(dest)
             self.bg.set(dest.name)
             self.notify("הרקע הועלה ונשמר")
@@ -1290,7 +1639,7 @@ class BlessingApp:
         except Exception as e:
             self.notify(f"שגיאה בהעלאת רקע: {e}")
 
-    # ── Step 3: frame ─────────────────────────────────────────────────────────
+    # ?? Step 3: frame ?????????????????????????????????????????????????????????
     def build_frame_step(self):
         self._section_hint("בחר/י מסגרת, או המשך ללא מסגרת.")
         bg_none = BRAND["accent"] if self.frame_var.get() == "__none__" else BRAND["surface"]
@@ -1308,12 +1657,740 @@ class BlessingApp:
     def select_frame_none(self):
         self.frame_var.set("__none__"); self.render_preview(); self.show_step("frame")
 
-    # ── Step 5: text editor ───────────────────────────────────────────────────
+    # ?? Text Formatting Topbar ????????????????????????????????????????????????
+    def _build_text_topbar(self):
+        BAR = "#0F172A"
+        bar = tk.Frame(self.content, bg=BAR, pady=8, padx=12)
+        self._text_topbar = bar
+        self._tb_target_btns = {}
+        self._active_text_target = "body"
+
+        def tool_button(text, command, width=None):
+            btn = tk.Button(bar, text=text, command=command, bg=BRAND["surface"], fg=BRAND["text"],
+                            bd=0, padx=10, pady=6, width=width,
+                            font=("Segoe UI", 10, "bold"), cursor="hand2")
+            btn.pack(side="right", padx=4)
+            return btn
+
+        self._tb_font_cb = ttk.Combobox(
+            bar, width=18, state="readonly",
+            values=ordered_fonts(getattr(self, "font_favorites", set())))
+        self._tb_font_cb.pack(side="right", padx=6)
+        self._tb_font_cb.bind("<<ComboboxSelected>>", lambda e: self._tb_apply())
+        self._tb_font_star = tool_button("☆", self._tb_toggle_font_favorite, 3)
+
+        self._tb_size_var = tk.IntVar(value=self.body_size.get())
+        tool_button("+", lambda: [self._tb_size_var.set(self._tb_size_var.get() + 2), self._tb_apply()], 2)
+        tk.Spinbox(bar, from_=10, to=300, textvariable=self._tb_size_var, width=5,
+                   command=self._tb_apply, justify="center", bg=BRAND["surface"],
+                   fg=BRAND["text"], relief="flat").pack(side="right", padx=2)
+        tool_button("-", lambda: [self._tb_size_var.set(max(10, self._tb_size_var.get() - 2)), self._tb_apply()], 2)
+
+        self._tb_color_btn = tool_button("■", self._tb_pick_color, 3)
+        self._tb_eyedrop_btn = tool_button("🔍", self.toggle_eyedropper, 3)
+        Tooltip(self._tb_eyedrop_btn, "דגימת צבע מהקנבס")
+        self._tb_italic_var = tk.BooleanVar(value=self.body_italic.get())
+        self._tb_italic_chk = tk.Checkbutton(
+            bar, text="I", variable=self._tb_italic_var, command=self._tb_apply,
+            font=("Segoe UI", 11, "italic"), bg=BRAND["surface"], fg=BRAND["text"],
+            selectcolor=BRAND["accent"], activebackground=BAR,
+            indicatoron=False, padx=10, pady=5, bd=0, cursor="hand2")
+        self._tb_italic_chk.pack(side="right", padx=4)
+        self._tb_bold_var = tk.BooleanVar(value=False)
+        self._tb_bold_btn = tk.Checkbutton(
+            bar, text="B", variable=self._tb_bold_var, command=self._tb_apply,
+            font=("Segoe UI", 11, "bold"), bg=BRAND["surface"], fg=BRAND["text"],
+            selectcolor=BRAND["accent"], activebackground=BAR,
+            indicatoron=False, padx=10, pady=5, bd=0, cursor="hand2")
+        self._tb_bold_btn.pack(side="right", padx=4)
+
+        self._tb_align_btns = {}
+        for value, label in [("left", "שמאל"), ("center", "מרכז"), ("right", "ימין")]:
+            self._tb_align_btns[value] = tool_button(label, lambda v=value: self._set_active_align(v))
+
+        self._tb_gradient_var = tk.BooleanVar(value=self.body_gradient.get())
+        tk.Checkbutton(bar, text="גרדיינט", variable=self._tb_gradient_var, command=self._toggle_gradient_from_toolbar,
+                       bg=BRAND["surface"], fg=BRAND["text"], selectcolor=BRAND["accent"],
+                       activebackground=BAR, indicatoron=False, padx=10, pady=5,
+                       bd=0, cursor="hand2").pack(side="right", padx=4)
+        self._tb_shadow_var = tk.BooleanVar(value=self.body_shadow.get())
+        tk.Checkbutton(bar, text="צל", variable=self._tb_shadow_var, command=self._toggle_shadow_from_toolbar,
+                       bg=BRAND["surface"], fg=BRAND["text"], selectcolor=BRAND["accent"],
+                       activebackground=BAR, indicatoron=False, padx=10, pady=5,
+                       bd=0, cursor="hand2").pack(side="right", padx=4)
+        self._tb_stroke_var = tk.BooleanVar(value=self.body_stroke_enabled.get())
+        tk.Checkbutton(bar, text="קו", variable=self._tb_stroke_var, command=self._toggle_stroke_from_toolbar,
+                       bg=BRAND["surface"], fg=BRAND["text"], selectcolor=BRAND["accent"],
+                       activebackground=BAR, indicatoron=False, padx=10, pady=5,
+                       bd=0, cursor="hand2").pack(side="right", padx=4)
+        tool_button("תיבה", self._open_card_popup)
+
+        self._tb_spacing_var = tk.IntVar(value=self.body_line_spacing.get())
+        self._tb_x_var = tk.IntVar(value=0)
+        self._tb_y_var = tk.IntVar(value=0)
+        self._tb_sync_from_target()
+        self._refresh_align_buttons()
+        return
+        BAR = "#0F172A"
+        bar = tk.Frame(self.right, bg=BAR, pady=5, padx=6)
+        self._text_topbar = bar
+        # Placed in row=1 of the grid, hidden initially via grid_remove
+        bar.grid(row=1, column=0, sticky="ew", padx=8, pady=(2, 0))
+        bar.grid_remove()  # hidden until text step
+
+        def sep():
+            tk.Frame(bar, bg=BRAND["border"], width=1).pack(
+                side="right", fill="y", padx=5, pady=3)
+
+        # ?? Target selector (rightmost) ?????????????????????????????????????
+        self._tb_target_btns = {}
+        for tid, lbl in [("third", "תחתון"), ("body", "ברכה"), ("title", "כותרת")]:
+            b = tk.Button(bar, text=lbl, bg=BRAND["surface"], fg=BRAND["text"],
+                          bd=0, padx=10, pady=3, font=("Segoe UI", 9, "bold"),
+                          cursor="hand2", relief="flat",
+                          command=lambda t=tid: self._tb_set_target(t))
+            b.pack(side="right", padx=2)
+            self._tb_target_btns[tid] = b
+        sep()
+
+        # ?? Font ?????????????????????????????????????????????????????????????
+        tk.Label(bar, text="גופן", bg=BAR, fg=BRAND["muted"],
+                 font=("Segoe UI", 8)).pack(side="right", padx=(6, 2))
+        self._tb_font_cb = ttk.Combobox(
+            bar, width=13, state="readonly",
+            values=ordered_fonts(getattr(self, "font_favorites", set())))
+        self._tb_font_cb.pack(side="right", padx=2, pady=2)
+        self._tb_font_cb.bind("<<ComboboxSelected>>", lambda e: self._tb_apply())
+        sep()
+
+        # ?? Size ?????????????????????????????????????????????????????????????
+        tk.Label(bar, text="גודל", bg=BAR, fg=BRAND["muted"],
+                 font=("Segoe UI", 8)).pack(side="right", padx=(6, 2))
+        self._tb_size_var = tk.IntVar(value=54)
+        sz = tk.Spinbox(bar, from_=10, to=300, textvariable=self._tb_size_var,
+                        width=4, command=self._tb_apply, justify="center",
+                        bg=BRAND["surface"], fg=BRAND["text"], relief="flat",
+                        disabledbackground=BRAND["surface"])
+        sz.pack(side="right", padx=2)
+        sz.bind("<Return>",   lambda e: self._tb_apply())
+        sz.bind("<FocusOut>", lambda e: self._tb_apply())
+        sep()
+
+        # ?? Bold + Italic ?????????????????????????????????????????????????????
+        self._tb_italic_var = tk.BooleanVar(value=False)
+        self._tb_italic_chk = tk.Checkbutton(
+            bar, text=" I ", variable=self._tb_italic_var, command=self._tb_apply,
+            font=("Segoe UI", 10, "italic"), bg=BAR, fg=BRAND["text"],
+            selectcolor=BRAND["accent"], activebackground=BAR,
+            indicatoron=False, padx=6, pady=2, bd=1, relief="groove",
+            cursor="hand2")
+        self._tb_italic_chk.pack(side="right", padx=2)
+
+        self._tb_bold_btn = tk.Label(bar, text=" B ", bg=BRAND["surface"],
+                                      fg=BRAND["muted"],
+                                      font=("Segoe UI", 10, "bold"),
+                                      padx=4, pady=2, relief="groove", bd=1)
+        self._tb_bold_btn.pack(side="right", padx=2)
+        Tooltip(self._tb_bold_btn, "כותרת תמיד מודגשת; ברכה/תחתון - לא")
+        sep()
+
+        # ?? Color swatch ?????????????????????????????????????????????????????
+        self._tb_color_btn = tk.Button(bar, text="  ? צבע  ", bg="#144C8A",
+                                        fg="white", bd=0, padx=8, pady=3,
+                                        cursor="hand2", font=("Segoe UI", 9, "bold"),
+                                        command=self._tb_pick_color)
+        self._tb_color_btn.pack(side="right", padx=4)
+
+        self._tb_eyedrop_btn = tk.Button(
+            bar, text="🔍", bg=BRAND["surface"], fg=BRAND["text"],
+            bd=0, padx=7, pady=3, cursor="hand2", font=("Segoe UI", 10),
+            command=self.toggle_eyedropper)
+        self._tb_eyedrop_btn.pack(side="right", padx=1)
+        Tooltip(self._tb_eyedrop_btn, "בחר צבע מהקנבס")
+        sep()
+
+        # ?? Effects ???????????????????????????????????????????????????????????
+        self._tb_shadow_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(bar, text="צל", variable=self._tb_shadow_var,
+                       command=self._tb_apply, bg=BAR, fg=BRAND["text"],
+                       selectcolor=BRAND["accent"], activebackground=BAR,
+                       font=("Segoe UI", 9)).pack(side="right", padx=3)
+
+        self._tb_gradient_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(bar, text="Gradient", variable=self._tb_gradient_var,
+                       command=self._tb_apply, bg=BAR, fg=BRAND["text"],
+                       selectcolor=BRAND["accent"], activebackground=BAR,
+                       font=("Segoe UI", 9)).pack(side="right", padx=3)
+        tk.Button(bar, text="?", bg=BRAND["surface"], fg=BRAND["text"],
+                  bd=0, padx=6, pady=2, cursor="hand2", font=("Segoe UI", 9),
+                  command=lambda: self.open_gradient_popup(
+                      self._active_text_target)).pack(side="right", padx=1)
+
+        self._tb_stroke_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(bar, text="Stroke", variable=self._tb_stroke_var,
+                       command=self._tb_apply, bg=BAR, fg=BRAND["text"],
+                       selectcolor=BRAND["accent"], activebackground=BAR,
+                       font=("Segoe UI", 9)).pack(side="right", padx=3)
+        sep()
+
+        # ?? Position X / Y ???????????????????????????????????????????????????
+        self._tb_y_var = tk.IntVar(value=0)
+        tk.Label(bar, text="Y", bg=BAR, fg=BRAND["muted"],
+                 font=("Segoe UI", 8)).pack(side="right", padx=(8, 1))
+        y_box = tk.Spinbox(bar, from_=-50, to=50, textvariable=self._tb_y_var,
+                           width=4, command=self._tb_apply, justify="center",
+                           bg=BRAND["surface"], fg=BRAND["text"], relief="flat")
+        y_box.pack(side="right", padx=2)
+        y_box.bind("<Return>",   lambda e: self._tb_apply())
+        y_box.bind("<FocusOut>", lambda e: self._tb_apply())
+
+        self._tb_x_var = tk.IntVar(value=0)
+        tk.Label(bar, text="X", bg=BAR, fg=BRAND["muted"],
+                 font=("Segoe UI", 8)).pack(side="right", padx=(8, 1))
+        x_box = tk.Spinbox(bar, from_=-50, to=50, textvariable=self._tb_x_var,
+                           width=4, command=self._tb_apply, justify="center",
+                           bg=BRAND["surface"], fg=BRAND["text"], relief="flat")
+        x_box.pack(side="right", padx=2)
+        x_box.bind("<Return>",   lambda e: self._tb_apply())
+        x_box.bind("<FocusOut>", lambda e: self._tb_apply())
+        sep()
+
+        # ?? Line spacing (body only, leftmost) ????????????????????????????????
+        self._tb_spacing_var = tk.IntVar(value=122)
+        self._tb_spacing_frame = tk.Frame(bar, bg=BAR)
+        tk.Label(self._tb_spacing_frame, text="ג‰¡", bg=BAR, fg=BRAND["muted"],
+                 font=("Segoe UI", 12)).pack(side="right", padx=(4, 1))
+        sp = tk.Spinbox(self._tb_spacing_frame, from_=80, to=200,
+                        textvariable=self._tb_spacing_var, width=4,
+                        command=self._tb_apply, justify="center",
+                        bg=BRAND["surface"], fg=BRAND["text"], relief="flat")
+        sp.pack(side="right", padx=2)
+        sp.bind("<Return>",   lambda e: self._tb_apply())
+        sp.bind("<FocusOut>", lambda e: self._tb_apply())
+        Tooltip(self._tb_spacing_frame, "מרווח שורות (לברכה בלבד)")
+
+    def _show_text_topbar(self):
+        if hasattr(self, "_text_topbar"):
+            if self._text_topbar.winfo_manager() != "pack":
+                if self.normal_view.winfo_ismapped():
+                    self.normal_view.pack_forget()
+                    self._text_topbar.pack(side="top", fill="x", pady=(0, 8))
+                    self.normal_view.pack(fill="both", expand=True)
+                else:
+                    self._text_topbar.pack(side="top", fill="x", pady=(0, 8))
+            self._tb_set_target("body")
+
+    def _hide_text_topbar(self):
+        if hasattr(self, "_text_topbar"):
+            self._text_topbar.pack_forget()
+
+    def _tb_set_target(self, target):
+        self._active_text_target = target
+        if hasattr(self, "_text_type_buttons"):
+            self._editor_text_target = target
+            self._refresh_text_type_buttons()
+        self._tb_sync_from_target()
+        for tid, btn in self._tb_target_btns.items():
+            active = tid == target
+            btn.configure(bg=BRAND["gold"] if active else BRAND["surface"],
+                          fg=BRAND["bg"] if active else BRAND["text"])
+        is_title = target == "title"
+        self._tb_bold_btn.configure(
+            fg=BRAND["text"] if is_title else BRAND["muted"])
+        if hasattr(self, "_tb_spacing_frame") and target == "body":
+            self._tb_spacing_frame.pack(side="right")
+        elif hasattr(self, "_tb_spacing_frame"):
+            self._tb_spacing_frame.pack_forget()
+
+    def _tb_sync_from_target(self):
+        t = self._active_text_target
+        self._tb_syncing = True
+        try:
+            font_val = getattr(self, f"{t}_font").get()
+            if font_val in (self._tb_font_cb["values"] or ()):
+                self._tb_font_cb.set(font_val)
+            if hasattr(self, "_tb_font_star"):
+                self._tb_font_star.configure(text="★" if font_val in self.font_favorites else "☆")
+            size_attr = getattr(self, f"{t}_size", None)
+            if size_attr:
+                self._tb_size_var.set(size_attr.get())
+                if hasattr(self, "_active_size_var"):
+                    self._active_size_var.set(size_attr.get())
+            italic_var = getattr(self, f"{t}_italic", None)
+            self._tb_italic_var.set(italic_var.get() if italic_var else False)
+            bold_var = getattr(self, f"{t}_bold", None)
+            self._tb_bold_var.set(True if t == "title" else (bold_var.get() if bold_var else False))
+            self._tb_shadow_var.set(getattr(self, f"{t}_shadow").get())
+            self._tb_gradient_var.set(getattr(self, f"{t}_gradient").get())
+            self._tb_stroke_var.set(getattr(self, f"{t}_stroke_enabled").get())
+            self._tb_x_var.set(getattr(self, f"{t}_x_off").get())
+            self._tb_y_var.set(getattr(self, f"{t}_y_off").get())
+            if t == "body":
+                self._tb_spacing_var.set(self.body_line_spacing.get())
+            self._refresh_align_buttons()
+            color = getattr(self, f"{t}_color").get()
+            r, g, b = hex_to_rgb(color)
+            luma = 0.299 * r + 0.587 * g + 0.114 * b
+            self._tb_color_btn.configure(
+                bg=color,
+                fg="white" if luma < 128 else "#111827",
+                text=f"  ■ {color}  ")
+        except Exception:
+            pass
+        finally:
+            self._tb_syncing = False
+
+    def _tb_apply(self):
+        if self._tb_syncing:
+            return
+        t = self._active_text_target
+        try:
+            font_val = self._tb_font_cb.get()
+            if font_val:
+                getattr(self, f"{t}_font").set(font_val)
+            size_attr = getattr(self, f"{t}_size", None)
+            if size_attr:
+                try:
+                    size_attr.set(int(self._tb_size_var.get()))
+                except (ValueError, tk.TclError):
+                    pass
+            italic_var = getattr(self, f"{t}_italic", None)
+            if italic_var:
+                italic_var.set(self._tb_italic_var.get())
+            bold_var = getattr(self, f"{t}_bold", None)
+            if bold_var:
+                bold_var.set(self._tb_bold_var.get())
+            getattr(self, f"{t}_shadow").set(self._tb_shadow_var.get())
+            getattr(self, f"{t}_gradient").set(self._tb_gradient_var.get())
+            getattr(self, f"{t}_stroke_enabled").set(self._tb_stroke_var.get())
+            if t == "body":
+                self.body_line_spacing.set(self._tb_spacing_var.get())
+                self.body_italic.set(self._tb_italic_var.get())
+                self.body_gradient.set(self._tb_gradient_var.get())
+                self.body_shadow.set(self._tb_shadow_var.get())
+                self.body_stroke_enabled.set(self._tb_stroke_var.get())
+        except Exception:
+            pass
+        self.schedule_render_preview()
+
+    def _tb_toggle_font_favorite(self):
+        font_name = self._tb_font_cb.get()
+        if not font_name:
+            return
+        if font_name in self.font_favorites:
+            self.font_favorites.remove(font_name)
+        else:
+            self.font_favorites.add(font_name)
+        self._save_settings()
+        values = ordered_fonts(self.font_favorites)
+        self._tb_font_cb.configure(values=values)
+        if hasattr(self, "_tb_font_star"):
+            self._tb_font_star.configure(text="★" if font_name in self.font_favorites else "☆")
+        for cb in getattr(self, "_font_combo_widgets", []):
+            cb.configure(values=values)
+
+    def _toggle_gradient_from_toolbar(self):
+        getattr(self, f"{self._active_text_target}_gradient").set(self._tb_gradient_var.get())
+        if self._tb_gradient_var.get():
+            self.open_gradient_popup(self._active_text_target)
+        self.schedule_render_preview()
+
+    def _toggle_shadow_from_toolbar(self):
+        getattr(self, f"{self._active_text_target}_shadow").set(self._tb_shadow_var.get())
+        if self._tb_shadow_var.get():
+            self._open_shadow_popup(self._active_text_target)
+        self.schedule_render_preview()
+
+    def _toggle_stroke_from_toolbar(self):
+        getattr(self, f"{self._active_text_target}_stroke_enabled").set(self._tb_stroke_var.get())
+        if self._tb_stroke_var.get():
+            self._open_stroke_popup(self._active_text_target)
+        self.schedule_render_preview()
+
+    def _set_active_align(self, value):
+        align_var = getattr(self, f"{self._active_text_target}_align", self.body_align)
+        align_var.set(value)
+        self._refresh_align_buttons()
+        self.schedule_render_preview()
+
+    def _set_body_align(self, value):
+        self._set_active_align(value)
+
+    def _set_active_size_from_panel(self):
+        if getattr(self, "_tb_syncing", False):
+            return
+        size_attr = getattr(self, f"{self._active_text_target}_size", None)
+        if not size_attr or not hasattr(self, "_active_size_var"):
+            return
+        try:
+            size_attr.set(int(self._active_size_var.get()))
+            if hasattr(self, "_tb_size_var"):
+                self._tb_size_var.set(size_attr.get())
+            self.schedule_render_preview()
+        except (ValueError, tk.TclError):
+            pass
+
+    def _refresh_align_buttons(self):
+        align_var = getattr(self, f"{self._active_text_target}_align", self.body_align)
+        for value, btn in getattr(self, "_tb_align_btns", {}).items():
+            active = value == align_var.get()
+            btn.configure(bg=BRAND["gold"] if active else BRAND["surface"],
+                          fg=BRAND["bg"] if active else BRAND["text"])
+
+    def _refresh_text_type_buttons(self):
+        current = getattr(self, "_editor_text_target", getattr(self, "_active_text_target", "body"))
+        for target, btn in getattr(self, "_text_type_buttons", {}).items():
+            active = target == current
+            btn.configure(bg=BRAND["gold"] if active else BRAND["surface"],
+                          fg=BRAND["bg"] if active else BRAND["text"])
+
+    def _text_style_presets(self):
+        return [
+            {
+                "id": "gold_gloss", "name": "זהב מבריק",
+                "desc": "גרדיינט זהב, קו כהה עדין וצל רך",
+                "color": "#B7791F", "opacity": 100, "bold": True, "italic": False,
+                "gradient": True, "gradient_a": "#FFF7AD", "gradient_b": "#B7791F",
+                "stroke": True, "stroke_color": "#5B3414", "stroke_width": 2,
+                "shadow": True, "shadow_color": "#000000", "shadow_size": 5,
+                "shadow_angle": 45, "shadow_opacity": 28,
+            },
+            {
+                "id": "balloon", "name": "כתב בלון",
+                "desc": "מילוי שקוף, קו שחור עבה ונקי",
+                "color": "#FFFFFF", "opacity": 0, "bold": True, "italic": False,
+                "gradient": False,
+                "stroke": True, "stroke_color": "#020617", "stroke_width": 7,
+                "shadow": False, "shadow_color": "#000000", "shadow_size": 0,
+                "shadow_angle": 45, "shadow_opacity": 0,
+            },
+            {
+                "id": "three_d", "name": "תלת מימד",
+                "desc": "כחול עמוק עם קו בהיר וצל מורגש",
+                "color": "#123766", "opacity": 100, "bold": True, "italic": False,
+                "gradient": True, "gradient_a": "#4DA3FF", "gradient_b": "#0B1B35",
+                "stroke": True, "stroke_color": "#E0F2FE", "stroke_width": 2,
+                "shadow": True, "shadow_color": "#07111F", "shadow_size": 12,
+                "shadow_angle": 45, "shadow_opacity": 62,
+            },
+            {
+                "id": "neon", "name": "ניאון",
+                "desc": "טורקיז זוהר, קו כהה וצל צבעוני",
+                "color": "#5EEAD4", "opacity": 100, "bold": True, "italic": False,
+                "gradient": False,
+                "stroke": True, "stroke_color": "#042F2E", "stroke_width": 3,
+                "shadow": True, "shadow_color": "#14B8A6", "shadow_size": 14,
+                "shadow_angle": 35, "shadow_opacity": 70,
+            },
+            {
+                "id": "classic_luxury", "name": "יוקרתי קלאסי",
+                "desc": "כחול כהה, קו זהב דק וצל מינימלי",
+                "color": "#111827", "opacity": 100, "bold": True, "italic": False,
+                "gradient": False,
+                "stroke": True, "stroke_color": "#D6A84F", "stroke_width": 1,
+                "shadow": True, "shadow_color": "#000000", "shadow_size": 3,
+                "shadow_angle": 45, "shadow_opacity": 22,
+            },
+            {
+                "id": "soft_wedding", "name": "חתונה רך",
+                "desc": "ורוד-זהב עדין עם צל קל",
+                "color": "#9F2D55", "opacity": 100, "bold": False, "italic": True,
+                "gradient": True, "gradient_a": "#F9A8D4", "gradient_b": "#F59E0B",
+                "stroke": True, "stroke_color": "#FFF7ED", "stroke_width": 1,
+                "shadow": True, "shadow_color": "#7C2D12", "shadow_size": 4,
+                "shadow_angle": 45, "shadow_opacity": 20,
+            },
+        ]
+
+    def _build_text_style_picker(self, parent):
+        wrap = tk.Frame(parent, bg="#111827")
+        wrap.pack(fill="x", pady=(12, 0))
+        tk.Label(wrap, text="סגנון כתב", bg="#111827", fg=BRAND["muted"],
+                 font=("Segoe UI", 10)).pack(anchor="e", pady=(0, 5))
+        self._style_picker_btn = tk.Button(
+            wrap, text="בחר סגנון  ▾", command=self._open_text_style_dropdown,
+            bg=BRAND["surface"], fg=BRAND["text"], bd=0, padx=14, pady=10,
+            anchor="e", font=("Segoe UI", 10, "bold"), cursor="hand2")
+        self._style_picker_btn.pack(fill="x")
+
+    def _style_preview_image(self, style):
+        img = Image.new("RGBA", (188, 54), (15, 23, 42, 255))
+        d = ImageDraw.Draw(img, "RGBA")
+        try:
+            fp = resolve_font("Segoe UI", bold=style.get("bold", False), italic=style.get("italic", False))
+            font = ImageFont.truetype(fp, 27) if fp else ImageFont.load_default()
+        except Exception:
+            font = ImageFont.load_default()
+        sample = bidi_text("ברכה")
+        bb = d.textbbox((0, 0), sample, font=font, stroke_width=int(style.get("stroke_width", 0)))
+        x = (img.width - (bb[2] - bb[0])) / 2
+        y = (img.height - (bb[3] - bb[1])) / 2 - 4
+        if style.get("shadow"):
+            dx = int(round(math.cos(math.radians(style.get("shadow_angle", 45))) * style.get("shadow_size", 4)))
+            dy = int(round(math.sin(math.radians(style.get("shadow_angle", 45))) * style.get("shadow_size", 4)))
+            alpha = int(255 * style.get("shadow_opacity", 35) / 100)
+            d.text((x + dx, y + dy), sample, font=font,
+                   fill=hex_to_rgb(style.get("shadow_color", "#000000")) + (alpha,))
+        stroke_width = int(style.get("stroke_width", 0)) if style.get("stroke") else 0
+        if style.get("gradient"):
+            if style.get("opacity", 100) > 0:
+                draw_gradient_text(
+                    img, (x, y), sample, font,
+                    style.get("gradient_a", style["color"]),
+                    style.get("gradient_b", style["color"]),
+                    "linear", 90, stroke_width, style.get("stroke_color", "#000000"))
+            elif stroke_width:
+                d.text((x, y), sample, font=font, fill=(255, 255, 255, 0),
+                       stroke_width=stroke_width,
+                       stroke_fill=hex_to_rgb(style.get("stroke_color", "#000000")) + (255,))
+        else:
+            d.text((x, y), sample, font=font,
+                   fill=hex_to_rgb(style["color"]) + (int(255 * style.get("opacity", 100) / 100),),
+                   stroke_width=stroke_width,
+                   stroke_fill=hex_to_rgb(style.get("stroke_color", "#000000")) + (255,))
+        return ImageTk.PhotoImage(img)
+
+    def _open_text_style_dropdown(self):
+        if hasattr(self, "_style_dropdown") and self._style_dropdown.winfo_exists():
+            self._style_dropdown.lift()
+            return
+        win = tk.Toplevel(self.root)
+        self._style_dropdown = win
+        win.title("סגנונות כתב")
+        win.configure(bg="#0F172A")
+        win.transient(self.root)
+        win.resizable(False, False)
+        win.grab_set()
+        win._imgs = []
+        tk.Label(win, text="סגנונות כתב", bg="#0F172A", fg=BRAND["gold"],
+                 font=("Segoe UI Semibold", 15)).pack(anchor="e", padx=14, pady=(12, 4))
+        tk.Label(win, text="הסגנון יחול על תיבת הטקסט הפעילה בלבד", bg="#0F172A",
+                 fg=BRAND["muted"], font=("Segoe UI", 9)).pack(anchor="e", padx=14, pady=(0, 8))
+        list_frame = tk.Frame(win, bg="#0F172A")
+        list_frame.pack(fill="both", padx=10, pady=(0, 8))
+        for style in self._text_style_presets():
+            row = tk.Frame(list_frame, bg=BRAND["surface"], padx=10, pady=8,
+                           highlightthickness=1, highlightbackground=BRAND["border"])
+            row.pack(fill="x", padx=6, pady=4)
+            img = self._style_preview_image(style)
+            win._imgs.append(img)
+            tk.Label(row, image=img, bg=BRAND["surface"]).pack(side="left", padx=(0, 9))
+            txt = tk.Frame(row, bg=BRAND["surface"])
+            txt.pack(side="right", fill="x", expand=True)
+            tk.Label(txt, text=style["name"], bg=BRAND["surface"], fg=BRAND["gold"],
+                     font=("Segoe UI", 10, "bold"), anchor="e").pack(fill="x")
+            tk.Label(txt, text=style["desc"], bg=BRAND["surface"], fg=BRAND["muted"],
+                     font=("Segoe UI", 8), anchor="e", justify="right", wraplength=180).pack(fill="x")
+            for widget in (row, txt):
+                widget.bind("<Button-1>", lambda e, s=style: self._apply_text_style(s))
+            for child in txt.winfo_children():
+                child.bind("<Button-1>", lambda e, s=style: self._apply_text_style(s))
+        tk.Button(win, text="סגור", command=win.destroy, bg=BRAND["surface"],
+                  fg=BRAND["text"], bd=0, padx=18, pady=7,
+                  font=("Segoe UI", 10, "bold"), cursor="hand2").pack(pady=(0, 12))
+        win.update_idletasks()
+        x = self.root.winfo_rootx() + max(0, (self.root.winfo_width() - win.winfo_width()) // 2)
+        y = self.root.winfo_rooty() + max(0, (self.root.winfo_height() - win.winfo_height()) // 2)
+        win.geometry(f"+{x}+{y}")
+
+    def _apply_text_style(self, style):
+        target = getattr(self, "_active_text_target", "body")
+        if hasattr(self, "_style_dropdown") and self._style_dropdown.winfo_exists():
+            self._style_dropdown.destroy()
+        getattr(self, f"{target}_color").set(style["color"])
+        getattr(self, f"{target}_opacity").set(style.get("opacity", 100))
+        bold_var = getattr(self, f"{target}_bold", None)
+        if bold_var:
+            bold_var.set(style.get("bold", False))
+        italic_var = getattr(self, f"{target}_italic", None)
+        if italic_var:
+            italic_var.set(style.get("italic", False))
+        getattr(self, f"{target}_gradient").set(style.get("gradient", False))
+        if style.get("gradient"):
+            getattr(self, f"{target}_gradient_a").set(style.get("gradient_a", style["color"]))
+            getattr(self, f"{target}_gradient_b").set(style.get("gradient_b", style["color"]))
+        getattr(self, f"{target}_stroke_enabled").set(style.get("stroke", False))
+        getattr(self, f"{target}_stroke_color").set(style.get("stroke_color", "#FFFFFF"))
+        getattr(self, f"{target}_stroke_width").set(style.get("stroke_width", 0))
+        getattr(self, f"{target}_shadow").set(style.get("shadow", False))
+        getattr(self, f"{target}_shadow_color").set(style.get("shadow_color", "#000000"))
+        getattr(self, f"{target}_shadow_size").set(style.get("shadow_size", 0))
+        getattr(self, f"{target}_shadow_angle").set(style.get("shadow_angle", 45))
+        getattr(self, f"{target}_shadow_opacity").set(style.get("shadow_opacity", 35))
+        for color_key in ("color", "gradient_a", "gradient_b", "stroke_color", "shadow_color"):
+            if style.get(color_key):
+                self._add_recent_color(style[color_key])
+        if hasattr(self, "_style_picker_btn"):
+            self._style_picker_btn.configure(text=f"{style['name']}  ▾")
+        self._tb_sync_from_target()
+        self.render_preview()
+
+    def _tb_pick_color(self):
+        t = self._active_text_target
+        color_var = getattr(self, f"{t}_color")
+        hex_c = self._ask_color(color_var.get(), "בחר צבע טקסט")
+        if hex_c:
+            color_var.set(hex_c)
+            r, g, b = hex_to_rgb(hex_c)
+            luma = 0.299 * r + 0.587 * g + 0.114 * b
+            self._tb_color_btn.configure(
+                bg=hex_c,
+                fg="white" if luma < 128 else "#111827",
+                text=f"  ■ {hex_c}  ")
+            self.schedule_render_preview()
+
+    def _apply_text_type_preset(self, size, weight="normal"):
+        self.body_size.set(size)
+        if hasattr(self, "_tb_size_var"):
+            self._tb_size_var.set(size)
+        self.body_shadow.set(weight == "bold")
+        self.schedule_render_preview()
+
+    def _simple_number_control(self, parent, label, var, min_value, max_value):
+        row = tk.Frame(parent, bg="#111827")
+        row.pack(fill="x", pady=8)
+        tk.Label(row, text=label, bg="#111827", fg=BRAND["muted"],
+                 font=("Segoe UI", 10)).pack(anchor="e")
+        box = tk.Frame(row, bg=BRAND["surface"])
+        box.pack(fill="x", pady=(4, 0))
+        tk.Button(box, text="+", command=lambda: [var.set(min(max_value, var.get() + 2)), self.schedule_render_preview()],
+                  bg=BRAND["surface"], fg=BRAND["text"], bd=0, padx=12, pady=7).pack(side="left")
+        tk.Label(box, textvariable=var, bg=BRAND["surface"], fg=BRAND["text"],
+                 font=("Segoe UI", 11)).pack(side="left", fill="x", expand=True)
+        tk.Button(box, text="-", command=lambda: [var.set(max(min_value, var.get() - 2)), self.schedule_render_preview()],
+                  bg=BRAND["surface"], fg=BRAND["text"], bd=0, padx=12, pady=7).pack(side="left")
+
+    def _simple_slider(self, parent, label, var, min_value, max_value):
+        row = tk.Frame(parent, bg="#111827")
+        row.pack(fill="x", pady=8)
+        tk.Label(row, text=label, bg="#111827", fg=BRAND["muted"],
+                 font=("Segoe UI", 10)).pack(anchor="e")
+        tk.Scale(row, from_=min_value, to=max_value, orient="horizontal", variable=var,
+                 command=lambda _=None: self.schedule_render_preview(),
+                 bg="#111827", fg=BRAND["text"], highlightthickness=0,
+                 troughcolor=BRAND["surface"]).pack(fill="x")
+
+    def _open_shadow_popup(self, target):
+        win = tk.Toplevel(self.root)
+        win.title("צל")
+        win.configure(bg=BRAND["panel"])
+        win.transient(self.root)
+        color = getattr(self, f"{target}_shadow_color")
+        for label, var, lo, hi in [
+            ("מרחק", getattr(self, f"{target}_shadow_size"), 0, 40),
+            ("זווית", getattr(self, f"{target}_shadow_angle"), 0, 360),
+            ("שקיפות", getattr(self, f"{target}_shadow_opacity"), 0, 100),
+        ]:
+            self._simple_slider(win, label, var, lo, hi)
+        self._inline_btn(win, "צבע צל", lambda: self.pick_var_color(color, "צבע צל"), anchor="e")
+        tk.Button(win, text="סגור", command=win.destroy, bg=BRAND["accent"], fg="white",
+                  bd=0, padx=16, pady=7, font=("Segoe UI", 10, "bold")).pack(pady=12)
+
+    def _open_stroke_popup(self, target):
+        win = tk.Toplevel(self.root)
+        win.title("קו מתאר")
+        win.configure(bg=BRAND["panel"])
+        win.transient(self.root)
+        self._simple_slider(win, "עובי קו", getattr(self, f"{target}_stroke_width"), 0, 18)
+        self._inline_btn(win, "צבע קו", lambda: self.pick_var_color(getattr(self, f"{target}_stroke_color"), "צבע קו"), anchor="e")
+        tk.Button(win, text="סגור", command=win.destroy, bg=BRAND["accent"], fg="white",
+                  bd=0, padx=16, pady=7, font=("Segoe UI", 10, "bold")).pack(pady=12)
+
+    def _open_card_popup(self):
+        win = tk.Toplevel(self.root)
+        win.title("תיבת טקסט")
+        win.configure(bg=BRAND["panel"])
+        win.transient(self.root)
+        self._chk2(win, "הצג תיבה", self.card_enabled)
+        self._simple_slider(win, "שקיפות תיבה", self.card_opacity, 0, 100)
+        self._inline_btn(win, "צבע תיבה", self.pick_card_color, anchor="e")
+        tk.Button(win, text="סגור", command=win.destroy, bg=BRAND["accent"], fg="white",
+                  bd=0, padx=16, pady=7, font=("Segoe UI", 10, "bold")).pack(pady=12)
+
+    # ?? Step 5: text editor ???????????????????????????????????????????????????
     def build_text_step(self):
+        self.left.configure(width=360, bg="#111827")
+        self.right.configure(bg="#111827")
+        self._left_vsb.pack_forget()
+        self._left_canvas.configure(bg="#111827", highlightthickness=0)
+        self.step_area.configure(bg="#111827")
+        self.preview_label.configure(bg="#111827")
+
+        header = tk.Frame(self.step_area, bg="#111827")
+        header.pack(fill="x", padx=18, pady=(14, 10))
+        tk.Label(header, text="מעצב ברכות", bg="#111827", fg=BRAND["text"],
+                 font=("Segoe UI Semibold", 18)).pack(side="right")
+
+        tabs = tk.Frame(self.step_area, bg=BRAND["surface"])
+        tabs.pack(fill="x", padx=18, pady=(0, 12))
+        tab_text_btn = tk.Button(tabs, text="טקסט", bd=0, padx=22, pady=12,
+                                 font=("Segoe UI", 11, "bold"), cursor="hand2")
+        tab_style_btn = tk.Button(tabs, text="עיצוב", bd=0, padx=22, pady=12,
+                                  font=("Segoe UI", 11, "bold"), cursor="hand2")
+        tab_style_btn.pack(side="left", fill="x", expand=True)
+        tab_text_btn.pack(side="right", fill="x", expand=True)
+
+        content = tk.Frame(self.step_area, bg="#111827")
+        content.pack(fill="both", expand=True, padx=18)
+        text_tab = tk.Frame(content, bg="#111827")
+        style_tab = tk.Frame(content, bg="#111827")
+
+        def show_tab(name):
+            for frame in (text_tab, style_tab):
+                frame.pack_forget()
+            active_text = name == "text"
+            (text_tab if active_text else style_tab).pack(fill="both", expand=True)
+            tab_text_btn.configure(bg=BRAND["gold"] if active_text else BRAND["surface"],
+                                   fg=BRAND["bg"] if active_text else BRAND["muted"])
+            tab_style_btn.configure(bg=BRAND["gold"] if not active_text else BRAND["surface"],
+                                    fg=BRAND["bg"] if not active_text else BRAND["muted"])
+
+        tab_text_btn.configure(command=lambda: show_tab("text"))
+        tab_style_btn.configure(command=lambda: show_tab("style"))
+
+        tk.Label(text_tab, text="תיבת טקסט", bg="#111827", fg=BRAND["muted"],
+                 font=("Segoe UI", 10)).pack(anchor="e", pady=(0, 6))
+        self.text_box = self._make_text(text_tab, height=10)
+        self.text_box.pack(fill="both", expand=True, pady=(0, 14))
+        self.text_box.delete("1.0", "end")
+        self.text_box.insert("1.0", self._text_cache)
+        self.root.after(120, lambda: self._set_body_text(self._text_cache, update_widget=True))
+        self.text_box.bind("<KeyRelease>", lambda e: self.cache_and_render(debounce=True), add="+")
+        self.text_box.bind("<FocusIn>", lambda e: self._tb_set_target(getattr(self, "_editor_text_target", "body")))
+
+        type_row = tk.Frame(text_tab, bg="#111827")
+        type_row.pack(fill="x", pady=(4, 0))
+        self._text_type_buttons = {}
+        for target, label in [("body", "תוכן"), ("third", "נושא"), ("title", "כותרת")]:
+            btn = tk.Button(type_row, text=label, command=lambda t=target: self._load_target_into_editor(t),
+                            bg=BRAND["surface"], fg=BRAND["text"], bd=0, padx=14, pady=9,
+                            font=("Segoe UI", 10, "bold"), cursor="hand2")
+            btn.pack(side="right", padx=4, fill="x", expand=True)
+            self._text_type_buttons[target] = btn
+        self._refresh_text_type_buttons()
+        self._build_text_style_picker(text_tab)
+
+        self._active_size_var = tk.IntVar(value=self.body_size.get())
+        self._simple_slider(style_tab, "גודל טקסט נבחר", self._active_size_var, 10, 300)
+        self._active_size_var.trace_add("write", lambda *_: self._set_active_size_from_panel())
+        self._font_combo("גופן", self.body_font, style_tab)
+        self._simple_slider(style_tab, "ריווח בין שורות", self.body_line_spacing, 80, 180)
+        self._simple_slider(style_tab, "ריווח בין אותיות", self.body_letter_spacing, 0, 40)
+        align_row = tk.Frame(style_tab, bg="#111827")
+        align_row.pack(fill="x", pady=(12, 0))
+        for value, label in [("left", "שמאל"), ("center", "מרכז"), ("right", "ימין")]:
+            tk.Button(align_row, text=label, command=lambda v=value: self._set_active_align(v),
+                      bg=BRAND["surface"], fg=BRAND["text"], bd=0, padx=12, pady=8,
+                      font=("Segoe UI", 10, "bold"), cursor="hand2").pack(side="right", padx=4, fill="x", expand=True)
+
+        show_tab("text")
+        self._tb_set_target("body")
+        self.render_preview()
+        return
         self._font_combo_widgets = []
         self._section_hint("עצב/י את הטקסט. Ctrl+C/V/A ותפריט ימני עובדים בכל תיבה.")
 
-        # ── Title collapsible ─────────────────────────────────────────────
+        # ?? Title collapsible ?????????????????????????????????????????????
         title_col = Collapsible(self.step_area, "כותרת", start_open=True)
         self._lbl2("טקסט כותרת", title_col.body)
         ent_title = tk.Entry(title_col.body, textvariable=self.title_text,
@@ -1322,6 +2399,7 @@ class BlessingApp:
                              font=("Segoe UI",12))
         ent_title.pack(fill="x", pady=4, padx=4)
         ent_title.bind("<KeyRelease>", lambda e: self.schedule_render_preview())
+        ent_title.bind("<FocusIn>", lambda e: self._tb_set_target("title"))
         self._add_copy_paste(ent_title)
 
         r = tk.Frame(title_col.body, bg=BRAND["panel"])
@@ -1333,7 +2411,7 @@ class BlessingApp:
         self._inline_btn(r, "Gradient...", lambda: self.open_gradient_popup("title"))
 
         self._lbl2("גודל כותרת", title_col.body)
-        tk.Scale(title_col.body, from_=24, to=150, orient="horizontal",
+        tk.Scale(title_col.body, from_=24, to=300, orient="horizontal",
                  variable=self.title_size, command=lambda _: self.render_preview(),
                  bg=BRAND["panel"], fg="white", highlightthickness=0,
                  troughcolor=BRAND["surface"]).pack(fill="x", padx=4)
@@ -1356,13 +2434,15 @@ class BlessingApp:
                  bg=BRAND["panel"], fg="white", highlightthickness=0,
                  troughcolor=BRAND["surface"]).pack(fill="x", padx=4)
 
-        # ── Body collapsible ──────────────────────────────────────────────
+        # ?? Body collapsible ??????????????????????????????????????????????
         body_col = Collapsible(self.step_area, "ברכה / גוף טקסט", start_open=True)
         self.text_box = self._make_text(body_col.body, height=8)
         self.text_box.pack(fill="x", pady=(0,6), padx=4)
         self.text_box.delete("1.0","end")
         self.text_box.insert("1.0", self._text_cache)
-        self.text_box.bind("<KeyRelease>", lambda e: self.cache_and_render(debounce=True))
+        self._configure_rtl_input(self.text_box)
+        self.text_box.bind("<KeyRelease>", lambda e: self.cache_and_render(debounce=True), add="+")
+        self.text_box.bind("<FocusIn>", lambda e: self._tb_set_target("body"))
 
         rb = tk.Frame(body_col.body, bg=BRAND["panel"])
         rb.pack(fill="x", pady=4)
@@ -1411,7 +2491,7 @@ class BlessingApp:
         if self.third_enabled.get():
             self._build_third_text_controls()
 
-        # ── Card bg collapsible ───────────────────────────────────────────
+        # ?? Card bg collapsible ???????????????????????????????????????????
         card_col = Collapsible(self.step_area, "רקע מאחורי הטקסט", start_open=False)
         self._chk2(card_col.body, "הצג תיבה", self.card_enabled)
         self._lbl2("שקיפות תיבה", card_col.body)
@@ -1439,7 +2519,7 @@ class BlessingApp:
             btn.pack(side="right", padx=3)
             Tooltip(btn, txt)
 
-        # ── Export / SPP collapsible ──────────────────────────────────────
+        # ?? Export / SPP collapsible ??????????????????????????????????????
         exp_col = Collapsible(self.step_area, "יצוא ושיתוף", start_open=True)
         row_exp = tk.Frame(exp_col.body, bg=BRAND["panel"])
         row_exp.pack(fill="x", pady=4)
@@ -1447,7 +2527,7 @@ class BlessingApp:
             ("יצוא PNG",         self.export_png,    BRAND["accent"]),
             ("יצוא PDF",         self.export_pdf,    BRAND["surface"]),
             ("תיקיית יצוא",      self.open_exports,  BRAND["surface"]),
-            ("שלח ל-SPP  🔗",    self._spp_stub,     BRAND["orange"]),
+            ("שלח ל-SPP  ??",    self._spp_stub,     BRAND["orange"]),
         ]:
             tk.Button(row_exp, text=txt, command=cmd, bg=bg, fg="white",
                       bd=0, padx=12, pady=6, font=("Segoe UI",10,"bold"),
@@ -1456,7 +2536,7 @@ class BlessingApp:
     def _spp_stub(self):
         self.notify("חיבור ל-SPP יתווסף בגרסה הבאה")
 
-    # ── widget helpers ────────────────────────────────────────────────────────
+    # ?? widget helpers ????????????????????????????????????????????????????????
     def _section_hint(self, text):
         tk.Label(self.step_area, text=text, bg=BRAND["panel"], fg=BRAND["muted"],
                  font=("Segoe UI",9), wraplength=470, justify="right",
@@ -1536,6 +2616,7 @@ class BlessingApp:
                        relief="flat", font=("Segoe UI",12))
         ent.pack(fill="x", pady=4, padx=4)
         ent.bind("<KeyRelease>", lambda e: self.schedule_render_preview())
+        ent.bind("<FocusIn>", lambda e: self._tb_set_target("third"))
         self._add_copy_paste(ent)
         tools = tk.Frame(third_col.body, bg=BRAND["panel"])
         tools.pack(fill="x", pady=4)
@@ -1589,7 +2670,7 @@ class BlessingApp:
                  font=("Segoe UI",9)).pack(anchor="e")
         top = tk.Frame(row, bg=BRAND["panel"])
         top.pack(fill="x", pady=2)
-        star = tk.Button(top, text="☆", command=lambda: self.toggle_font_favorite(var),
+        star = tk.Button(top, text="?", command=lambda: self.toggle_font_favorite(var),
                          bg=BRAND["surface"], fg=BRAND["gold"], bd=0,
                          width=3, cursor="hand2", font=("Segoe UI", 10, "bold"))
         star.pack(side="left", padx=(0,4))
@@ -1602,7 +2683,7 @@ class BlessingApp:
                            font=("Segoe UI", 10), anchor="e")
         preview.pack(fill="x")
         def refresh(_event=None):
-            star.configure(text=("★" if var.get() in self.font_favorites else "☆"))
+            star.configure(text=("?" if var.get() in self.font_favorites else "?"))
             path = resolve_font(var.get())
             if path:
                 try:
@@ -1636,28 +2717,72 @@ class BlessingApp:
         self.schedule_render_preview()
 
     def _make_text(self, parent, height=6):
+        if NativeRtlText.available():
+            txt = NativeRtlText(parent, height=height,
+                                font=("Segoe UI", 11),
+                                bg=BRAND["surface"], fg=BRAND["text"],
+                                insertbackground="white")
+            self._add_copy_paste(txt)
+            self._add_context_menu(txt)
+            return txt
         txt = tk.Text(parent, height=height, wrap="word",
                       font=("Segoe UI",11), undo=True,
                       bg=BRAND["surface"], fg=BRAND["text"],
                       insertbackground="white", relief="flat",
                       padx=8, pady=6)
+        self._configure_rtl_input(txt)
         self._add_copy_paste(txt)
         self._add_context_menu(txt)
         return txt
 
     def _add_copy_paste(self, widget):
+        self._configure_rtl_input(widget)
         widget.bind("<Control-a>", self._ctrl_a)
         widget.bind("<Control-A>", self._ctrl_a)
-        # let Tk handle C/V/X natively — just ensure no override breaks them
+        # let Tk handle C/V/X natively ? just ensure no override breaks them
         for seq in ("<Control-c>","<Control-C>","<Control-v>","<Control-V>",
                     "<Control-x>","<Control-X>"):
             widget.bind(seq, lambda e, s=seq: None)
+        self._add_rtl_bindings(widget)
+
+    def _configure_rtl_input(self, widget):
+        """Keep Hebrew input logical while displaying and selecting it RTL."""
+        try:
+            widget.configure(justify="right")
+        except Exception:
+            pass
+        already_configured = getattr(widget, "_hadish_rtl_configured", False)
+        if isinstance(widget, tk.Text):
+            try:
+                widget.tag_configure("rtl", justify="right", lmargin1=8, lmargin2=8, rmargin=8)
+                widget.tag_add("rtl", "1.0", "end")
+            except Exception:
+                pass
+            if already_configured:
+                return
+            def refresh_rtl(_event=None, w=widget):
+                try:
+                    w.tag_add("rtl", "1.0", "end")
+                except Exception:
+                    pass
+            widget.bind("<KeyRelease>", refresh_rtl, add="+")
+            widget.bind("<<Paste>>", lambda e, w=widget: w.after_idle(refresh_rtl), add="+")
+            widget.bind("<FocusIn>", refresh_rtl, add="+")
+        if not already_configured:
+            try:
+                widget._hadish_rtl_configured = True
+            except Exception:
+                pass
+
+    def _add_rtl_bindings(self, widget):
+        """Use Tk's native cursor, selection and deletion behavior for RTL text."""
+        return None
 
     def _ctrl_a(self, event):
         w = event.widget
         try:
             if isinstance(w, tk.Text):
-                w.tag_add("sel","1.0","end-1c"); w.mark_set("insert","1.0")
+                w.tag_add("sel","1.0","end-1c"); w.mark_set("insert","end-1c")
             else:
                 w.select_range(0,"end"); w.icursor("end")
             return "break"
@@ -1676,7 +2801,7 @@ class BlessingApp:
             finally: menu.grab_release()
         widget.bind("<Button-3>", show)
 
-    # ── asset grid ────────────────────────────────────────────────────────────
+    # ?? asset grid ????????????????????????????????????????????????????????????
     def asset_grid(self, folder, var, kind, columns=3, height=470):
         outer = tk.Canvas(self.step_area, bg=BRAND["panel"], highlightthickness=0, height=height)
         vsb   = ttk.Scrollbar(self.step_area, orient="vertical", command=outer.yview)
@@ -1687,8 +2812,26 @@ class BlessingApp:
         outer.pack(side="left", fill="both", expand=True, padx=(18,0), pady=4)
         vsb.pack(side="right", fill="y", pady=4)
         self.asset_thumbs = []
-        for idx, path in enumerate(sorted(folder.glob("*.png"))):
-            img = Image.open(path).convert("RGB"); img.thumbnail((112,112), Image.Resampling.LANCZOS)
+        _globs = ["*.png","*.PNG","*.jpg","*.JPG","*.jpeg","*.JPEG"]
+        if _cairosvg is not None:
+            _globs += ["*.svg","*.SVG"]
+        all_paths = sorted({p for g in _globs for p in folder.glob(g)},
+                           key=lambda p: p.name.lower())
+        for idx, path in enumerate(all_paths):
+            try:
+                if path.suffix.lower() == ".svg":
+                    raw = _load_svg_as_pil(path)
+                else:
+                    raw = Image.open(path)
+                raw.thumbnail((112, 112), Image.Resampling.LANCZOS)
+                if raw.mode in ("RGBA", "LA", "P"):
+                    rgba = raw.convert("RGBA")
+                    white = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+                    img = Image.alpha_composite(white, rgba).convert("RGB")
+                else:
+                    img = raw.convert("RGB")
+            except Exception:
+                img = Image.new("RGB", (112, 112), "#334155")
             tk_img = ImageTk.PhotoImage(img); self.asset_thumbs.append(tk_img)
             sel = path.name == var.get()
             bg  = BRAND["accent"] if sel else BRAND["surface"]
@@ -1706,7 +2849,7 @@ class BlessingApp:
         self.render_preview()
         self.show_step(kind if kind in ("background","frame") else kind)
 
-    # ── blessings step helpers (old simple list, kept as fallback) ────────────
+    # ?? blessings step helpers (old simple list, kept as fallback) ????????????
     def paste_to_main(self):
         try:
             txt = self.root.clipboard_get()
@@ -1717,13 +2860,17 @@ class BlessingApp:
 
     def cache_and_render(self, debounce=False):
         if hasattr(self,"text_box") and self.text_box.winfo_exists():
-            self._text_cache = self.text_box.get("1.0","end").strip()
+            if isinstance(self.text_box, tk.Text):
+                val = self.text_box.get("1.0","end-1c")
+            else:
+                val = self.text_box.get("1.0","end")
+            self._set_target_text(getattr(self, "_editor_text_target", "body"), val)
         if debounce:
             self.schedule_render_preview()
         else:
             self.render_preview()
 
-    # ── presets ───────────────────────────────────────────────────────────────
+    # ?? presets ???????????????????????????????????????????????????????????????
     def apply_title_preset(self):
         p = self.title_preset.get()
         if   p == "זהב אלגנטי":  self.title_color.set("#C99437"); self.title_shadow.set(True)
@@ -1740,7 +2887,7 @@ class BlessingApp:
         else:                       self.body_color.set("#1E293B"); self.body_shadow.set(False)
         self.render_preview()
 
-    # ── color pickers ─────────────────────────────────────────────────────────
+    # ?? color pickers ?????????????????????????????????????????????????????????
     def _style_snapshot(self):
         return {
             "title_color": self.title_color.get(), "title_size": self.title_size.get(),
@@ -1841,23 +2988,144 @@ class BlessingApp:
                 self.preset_combo.configure(values=sorted(self.style_presets.keys()))
             self.notify("Preset נמחק")
 
+    # ?? color picker with recent colors ??????????????????????????????????????
+    _PALETTE = [
+        "#FFFFFF","#000000","#1E293B","#144C8A","#F59E0B","#DC2626",
+        "#16A34A","#7C3AED","#DB2777","#0891B2","#D97706","#6B7280",
+        "#DBEAFE","#FEF3C7","#DCFCE7","#FCE7F3","#F3E8FF","#FFE4E6",
+    ]
+
+    def _add_recent_color(self, hex_c: str):
+        if not hasattr(self, "_recent_colors"):
+            self._recent_colors = []
+        hex_c = hex_c.lower()
+        if hex_c in self._recent_colors:
+            self._recent_colors.remove(hex_c)
+        self._recent_colors.insert(0, hex_c)
+        self._recent_colors = self._recent_colors[:18]
+        self._save_settings()
+
+    def _ask_color(self, initial="#FFFFFF", title="בחר צבע") -> "str | None":
+        """Color picker dialog with recent-color swatches and a palette."""
+        win = tk.Toplevel(self.root)
+        win.title(title)
+        win.configure(bg=BRAND["panel"])
+        win.transient(self.root)
+        win.grab_set()
+        win.resizable(False, False)
+        result = [None]
+
+        def _pick(hex_c):
+            result[0] = hex_c
+            self._add_recent_color(hex_c)
+            win.destroy()
+
+        def _open_system():
+            win.withdraw()
+            c = colorchooser.askcolor(initialcolor=initial, title=title)
+            if c and c[1]:
+                _pick(c[1])
+            else:
+                win.deiconify()
+
+        def _swatch_row(parent, colors, label):
+            if not colors:
+                return
+            tk.Label(parent, text=label, bg=BRAND["panel"], fg=BRAND["muted"],
+                     font=("Segoe UI", 8)).pack(anchor="e", padx=12, pady=(8, 2))
+            row = tk.Frame(parent, bg=BRAND["panel"])
+            row.pack(padx=12, pady=(0, 4))
+            for i, hc in enumerate(colors):
+                relief = "sunken" if hc.lower() == initial.lower() else "solid"
+                btn = tk.Button(row, bg=hc, width=2, height=1, bd=1,
+                                relief=relief, cursor="hand2",
+                                highlightbackground="#F59E0B" if relief=="sunken" else hc,
+                                command=lambda h=hc: _pick(h))
+                btn.grid(row=i//9, column=i%9, padx=1, pady=1)
+
+        tk.Label(win, text=title, bg=BRAND["panel"], fg=BRAND["gold"],
+                 font=("Segoe UI Semibold", 13)).pack(anchor="e", padx=14, pady=(12, 4))
+
+        recent = getattr(self, "_recent_colors", [])
+        _swatch_row(win, recent[:18], "צבעים אחרונים")
+        _swatch_row(win, self._PALETTE, "פלטה")
+
+        btns = tk.Frame(win, bg=BRAND["panel"])
+        btns.pack(fill="x", padx=12, pady=(6, 12))
+        tk.Button(btns, text="צבע נוסף...", command=_open_system,
+                  bg=BRAND["surface"], fg=BRAND["text"], bd=0, padx=10, pady=5,
+                  font=("Segoe UI", 9, "bold"), cursor="hand2").pack(side="right")
+        tk.Button(btns, text="ביטול", command=win.destroy,
+                  bg=BRAND["surface"], fg=BRAND["muted"], bd=0, padx=10, pady=5,
+                  font=("Segoe UI", 9), cursor="hand2").pack(side="right", padx=4)
+
+        self.root.wait_window(win)
+        return result[0]
+
+    # ?? eyedropper: pick color from canvas ???????????????????????????????????
+    def toggle_eyedropper(self):
+        self._eyedropper_active = not getattr(self, "_eyedropper_active", False)
+        cursor = "crosshair" if self._eyedropper_active else ""
+        self.preview_label.configure(cursor=cursor)
+        if hasattr(self, "_tb_eyedrop_btn"):
+            self._tb_eyedrop_btn.configure(
+                bg=BRAND["gold"] if self._eyedropper_active else BRAND["surface"],
+                fg=BRAND["bg"]  if self._eyedropper_active else BRAND["text"])
+        if self._eyedropper_active:
+            self.notify("לחץ על הקנבס לבחירת צבע")
+
+    def _pick_color_from_preview(self, event):
+        img = getattr(self, "last_image", None)
+        if img is None:
+            return
+        size = getattr(self, "_preview_size", None)
+        if not size:
+            return
+        lw = max(1, self.preview_label.winfo_width())
+        lh = max(1, self.preview_label.winfo_height())
+        iw, ih = size
+        off_x = max(0, (lw - iw) // 2)
+        off_y = max(0, (lh - ih) // 2)
+        scale_x = img.width  / max(1, iw)
+        scale_y = img.height / max(1, ih)
+        px = int((event.x - off_x) * scale_x)
+        py = int((event.y - off_y) * scale_y)
+        px = max(0, min(px, img.width  - 1))
+        py = max(0, min(py, img.height - 1))
+        r, g, b = img.convert("RGB").getpixel((px, py))
+        hex_c = f"#{r:02x}{g:02x}{b:02x}"
+        t = getattr(self, "_active_text_target", "body")
+        getattr(self, f"{t}_color").set(hex_c)
+        self._add_recent_color(hex_c)
+        if hasattr(self, "_tb_color_btn"):
+            luma = 0.299*r + 0.587*g + 0.114*b
+            self._tb_color_btn.configure(
+                bg=hex_c, fg="white" if luma < 128 else "#111827",
+                text=f"  ■ {hex_c}  ")
+        self.schedule_render_preview()
+        self.notify(f"צבע נבחר: {hex_c}")
+        self._eyedropper_active = False
+        self.preview_label.configure(cursor="")
+        if hasattr(self, "_tb_eyedrop_btn"):
+            self._tb_eyedrop_btn.configure(bg=BRAND["surface"], fg=BRAND["text"])
+
     def pick_card_color(self):
-        c = colorchooser.askcolor(initialcolor=self.card_color.get(), title="צבע תיבת טקסט")
-        if c and c[1]: self.card_color.set(c[1]); self.render_preview()
+        c = self._ask_color(self.card_color.get(), "צבע תיבת טקסט")
+        if c: self.card_color.set(c); self.render_preview()
 
     def pick_title_color(self):
-        c = colorchooser.askcolor(initialcolor=self.title_color.get(), title="צבע כותרת")
-        if c and c[1]: self.title_color.set(c[1]); self.render_preview()
+        c = self._ask_color(self.title_color.get(), "צבע כותרת")
+        if c: self.title_color.set(c); self.render_preview()
 
     def pick_body_color(self):
-        c = colorchooser.askcolor(initialcolor=self.body_color.get(), title="צבע גוף טקסט")
-        if c and c[1]: self.body_color.set(c[1]); self.render_preview()
+        c = self._ask_color(self.body_color.get(), "צבע גוף טקסט")
+        if c: self.body_color.set(c); self.render_preview()
 
-    # ── canvas size ───────────────────────────────────────────────────────────
+    # ?? canvas size ???????????????????????????????????????????????????????????
     def pick_var_color(self, var, title="בחר צבע"):
-        c = colorchooser.askcolor(initialcolor=var.get(), title=title)
-        if c and c[1]:
-            var.set(c[1])
+        c = self._ask_color(var.get(), title)
+        if c:
+            var.set(c)
             self.render_preview()
 
     def open_gradient_popup(self, target):
@@ -1915,7 +3183,12 @@ class BlessingApp:
         cached = self._image_cache.get(key)
         if cached is not None:
             return cached.copy()
-        img = Image.open(path).convert(mode).resize(size, Image.Resampling.LANCZOS)
+        p = Path(path)
+        if p.suffix.lower() == ".svg":
+            img = _load_svg_as_pil(p, size=size).convert(mode)
+        else:
+            img = Image.open(path).convert(mode)
+        img = img.resize(size, Image.Resampling.LANCZOS)
         if len(self._image_cache) > 24:
             self._image_cache.clear()
         self._image_cache[key] = img.copy()
@@ -1938,14 +3211,35 @@ class BlessingApp:
         dx, dy, fill = shadow
         draw.text((pos[0] + dx, pos[1] + dy), text, font=font, fill=fill)
 
-    # ── render ────────────────────────────────────────────────────────────────
+    def _text_width_with_spacing(self, draw, text, font, spacing):
+        if not spacing:
+            bb = draw.textbbox((0, 0), text, font=font)
+            return bb[2] - bb[0]
+        return sum(draw.textbbox((0, 0), ch, font=font)[2] for ch in text) + max(0, len(text) - 1) * spacing
+
+    def _draw_text_with_spacing(self, draw, pos, text, font, fill, spacing=0, stroke_width=0, stroke_fill=None):
+        if not spacing:
+            draw.text(pos, text, font=font, fill=fill,
+                      stroke_width=int(stroke_width or 0), stroke_fill=stroke_fill)
+            return
+        x, y = pos
+        for ch in text:
+            draw.text((x, y), ch, font=font, fill=fill,
+                      stroke_width=int(stroke_width or 0), stroke_fill=stroke_fill)
+            bb = draw.textbbox((0, 0), ch, font=font, stroke_width=int(stroke_width or 0))
+            x += (bb[2] - bb[0]) + spacing
+
+    # ?? render ????????????????????????????????????????????????????????????????
     def render_image(self, dpi=300):
         self._render_overflow_messages = []
         Wpx, Hpx = self.get_canvas_size(dpi=dpi)
         bp = BG_DIR / self.bg.get()
-        bg_img = self._cached_resized_image(bp, (Wpx,Hpx), "RGB") \
-                 if bp.exists() else Image.new("RGB",(Wpx,Hpx),"white")
-        img  = bg_img.convert("RGBA")
+        if bp.exists():
+            raw_bg = self._cached_resized_image(bp, (Wpx,Hpx), "RGBA")
+            white  = Image.new("RGBA", (Wpx, Hpx), (255, 255, 255, 255))
+            img    = Image.alpha_composite(white, raw_bg)
+        else:
+            img = Image.new("RGBA", (Wpx, Hpx), (255, 255, 255, 255))
         safe = int(min(Wpx,Hpx) * 0.075)
 
         title     = self.title_text.get().strip()
@@ -1992,13 +3286,14 @@ class BlessingApp:
         d = ImageDraw.Draw(img, "RGBA")
 
         # resolve fonts
-        t_bold   = True
+        t_bold   = getattr(self, "title_bold", tk.BooleanVar(value=True)).get()
         t_italic = self.title_italic.get()
         b_italic = self.body_italic.get()
+        b_bold   = getattr(self, "body_bold", tk.BooleanVar(value=False)).get()
         t_fp = resolve_font(self.title_font.get(), bold=t_bold, italic=t_italic)
-        b_fp = resolve_font(self.body_font.get(),  bold=False,  italic=b_italic)
-        if not t_fp: t_fp = (FONT_BOLD_ITALIC if t_italic else FONT_BOLD) or FONT_REG
-        if not b_fp: b_fp = (FONT_ITALIC      if b_italic else FONT_REG)
+        b_fp = resolve_font(self.body_font.get(),  bold=b_bold,  italic=b_italic)
+        if not t_fp: t_fp = (FONT_BOLD_ITALIC if t_bold and t_italic else FONT_BOLD if t_bold else FONT_ITALIC if t_italic else FONT_REG)
+        if not b_fp: b_fp = (FONT_BOLD_ITALIC if b_bold and b_italic else FONT_BOLD if b_bold else FONT_ITALIC if b_italic else FONT_REG)
 
         # title
         if has_title:
@@ -2008,19 +3303,27 @@ class BlessingApp:
             except: tfont = ImageFont.load_default()
             vis   = bidi_text(title)
             bb    = d.textbbox((0,0), vis, font=tfont)
-            tx    = (Wpx - (bb[2]-bb[0])) / 2 + tx_off
+            title_w = bb[2] - bb[0]
+            t_align = getattr(self, "title_align", tk.StringVar(value="center")).get()
+            if t_align == "right":
+                tx = Wpx - safe * 2 - title_w + tx_off
+            elif t_align == "left":
+                tx = safe * 2 + tx_off
+            else:
+                tx = (Wpx - title_w) / 2 + tx_off
             t_stroke = self.title_stroke_width.get() if self.title_stroke_enabled.get() else 0
             if bb[2] - bb[0] > Wpx - safe * 2:
                 self._render_overflow_messages.append("הכותרת גדולה מדי לשטח הברכה")
             self._draw_shadow(d, "title", (tx, title_y), vis, tfont)
-            if self.title_gradient.get():
+            title_alpha = int(255 * max(0, min(100, self.title_opacity.get())) / 100)
+            if self.title_gradient.get() and title_alpha > 0:
                 draw_gradient_text(
                     img, (tx, title_y), vis, tfont,
                     self.title_gradient_a.get(), self.title_gradient_b.get(),
                     self.title_gradient_mode.get(), self.title_gradient_angle.get(),
                     t_stroke, self.title_stroke_color.get())
             else:
-                d.text((tx, title_y), vis, font=tfont, fill=hex_to_rgb(self.title_color.get())+(255,),
+                d.text((tx, title_y), vis, font=tfont, fill=hex_to_rgb(self.title_color.get())+(title_alpha,),
                        stroke_width=int(t_stroke), stroke_fill=hex_to_rgb(self.title_stroke_color.get())+(255,))
 
         # body
@@ -2040,38 +3343,66 @@ class BlessingApp:
             lines = [body_text]; line_h = 34
         total_h = line_h * len(lines)
         y = body_box[1] + max(0, (body_box[3]-body_box[1]-total_h)//2)
+        body_alpha = int(255 * max(0, min(100, self.body_opacity.get())) / 100)
         body_rgb = hex_to_rgb(self.body_color.get())
         b_stroke = self.body_stroke_width.get() if self.body_stroke_enabled.get() else 0
+        letter_spacing = int(getattr(self, "body_letter_spacing", tk.IntVar(value=0)).get() * (min(Wpx,Hpx)/1748))
         for line in lines:
             vis = bidi_text(line)
-            bb  = d.textbbox((0,0), vis, font=font)
-            x   = (Wpx - (bb[2]-bb[0])) / 2
-            self._draw_shadow(d, "body", (x, y), vis, font)
-            if self.body_gradient.get():
+            line_w = self._text_width_with_spacing(d, vis, font, letter_spacing)
+            align = getattr(self, "body_align", tk.StringVar(value="center")).get()
+            if align == "right":
+                x = body_box[2] - line_w
+            elif align == "left":
+                x = body_box[0]
+            else:
+                x = body_box[0] + ((body_box[2] - body_box[0]) - line_w) / 2
+            if letter_spacing:
+                shadow = self._shadow_args("body")
+                if shadow:
+                    dx, dy, fill = shadow
+                    self._draw_text_with_spacing(d, (x + dx, y + dy), vis, font, fill, letter_spacing)
+                self._draw_text_with_spacing(
+                    d, (x, y), vis, font, body_rgb+(body_alpha,), letter_spacing,
+                    b_stroke, hex_to_rgb(self.body_stroke_color.get())+(255,))
+            elif self.body_gradient.get() and body_alpha > 0:
+                self._draw_shadow(d, "body", (x, y), vis, font)
                 draw_gradient_text(
                     img, (x, y), vis, font,
                     self.body_gradient_a.get(), self.body_gradient_b.get(),
                     self.body_gradient_mode.get(), self.body_gradient_angle.get(),
                     b_stroke, self.body_stroke_color.get())
             else:
-                d.text((x, y), vis, font=font, fill=body_rgb+(255,),
+                self._draw_shadow(d, "body", (x, y), vis, font)
+                d.text((x, y), vis, font=font, fill=body_rgb+(body_alpha,),
                        stroke_width=int(b_stroke), stroke_fill=hex_to_rgb(self.body_stroke_color.get())+(255,))
             y += line_h
 
         if self.third_enabled.get() and self.third_text.get().strip():
             third = bidi_text(self.third_text.get().strip())
-            th_fp = resolve_font(self.third_font.get())
+            th_fp = resolve_font(
+                self.third_font.get(),
+                bold=getattr(self, "third_bold", tk.BooleanVar(value=False)).get(),
+                italic=getattr(self, "third_italic", tk.BooleanVar(value=False)).get())
             th_sz = int(self.third_size.get() * (min(Wpx,Hpx)/1748))
             th_sz = max(14, min(th_sz, 180))
             try:    th_font = ImageFont.truetype(th_fp, th_sz) if th_fp else ImageFont.load_default()
             except: th_font = ImageFont.load_default()
             th_bb = d.textbbox((0,0), third, font=th_font)
-            th_x = (Wpx - (th_bb[2] - th_bb[0])) / 2 + thx_off
+            th_w = th_bb[2] - th_bb[0]
+            th_align = getattr(self, "third_align", tk.StringVar(value="center")).get()
+            if th_align == "right":
+                th_x = Wpx - safe * 2 - th_w + thx_off
+            elif th_align == "left":
+                th_x = safe * 2 + thx_off
+            else:
+                th_x = (Wpx - th_w) / 2 + thx_off
             th_y = int(Hpx * 0.80) + thy_off
             if th_bb[2] - th_bb[0] > Wpx - safe * 2 or th_y + (th_bb[3] - th_bb[1]) > Hpx - safe:
                 self._render_overflow_messages.append("תיבת הטקסט התחתונה חורגת מהברכה")
             th_stroke = self.third_stroke_width.get() if self.third_stroke_enabled.get() else 0
-            if self.third_gradient.get():
+            third_alpha = int(255 * max(0, min(100, self.third_opacity.get())) / 100)
+            if self.third_gradient.get() and third_alpha > 0:
                 self._draw_shadow(d, "third", (th_x, th_y), third, th_font)
                 draw_gradient_text(
                     img, (th_x, th_y), third, th_font,
@@ -2080,7 +3411,7 @@ class BlessingApp:
                     th_stroke, self.third_stroke_color.get())
             else:
                 self._draw_shadow(d, "third", (th_x, th_y), third, th_font)
-                d.text((th_x, th_y), third, font=th_font, fill=hex_to_rgb(self.third_color.get())+(255,),
+                d.text((th_x, th_y), third, font=th_font, fill=hex_to_rgb(self.third_color.get())+(third_alpha,),
                        stroke_width=int(th_stroke), stroke_fill=hex_to_rgb(self.third_stroke_color.get())+(255,))
 
         return img.convert("RGB")
@@ -2088,11 +3419,11 @@ class BlessingApp:
     def render_preview(self):
         try:
             if hasattr(self,"text_box") and self.text_box.winfo_exists():
-                val = self.text_box.get("1.0", "end").strip()
-                # only overwrite cache when the widget actually has content,
-                # or when we intentionally want to clear it (val=="", cache already "")
-                if val or not self._text_cache:
-                    self._text_cache = val
+                if isinstance(self.text_box, tk.Text):
+                    val = self.text_box.get("1.0", "end-1c")
+                else:
+                    val = self.text_box.get("1.0", "end")
+                self._set_target_text(getattr(self, "_editor_text_target", "body"), val)
             self.last_image = self.render_image(dpi=110)
             prev = self.last_image.copy()
             area_w = max(380, self.right.winfo_width()-40)
@@ -2108,11 +3439,14 @@ class BlessingApp:
         except Exception as e:
             self.preview_label.configure(text=f"שגיאה בתצוגה:\n{e}", image="")
 
-    # ── export ────────────────────────────────────────────────────────────────
+    # ?? export ????????????????????????????????????????????????????????????????
     def _clear_overflow_notice_lock(self):
         self._overflow_notice_after = None
 
     def _preview_drag_start(self, event):
+        if getattr(self, "_eyedropper_active", False):
+            self._pick_color_from_preview(event)
+            return
         size = getattr(self, "_preview_size", None)
         if not size:
             return
@@ -2128,6 +3462,8 @@ class BlessingApp:
             target = "third"
         else:
             target = "title" if self.title_text.get().strip() and rel_y < 0.34 else "body"
+        if self.current_step == "text":
+            self._load_target_into_editor(target)
         self._drag_preview = {
             "target": target, "x": event.x, "y": event.y,
             "title_x": self.title_x_off.get(), "title_y": self.title_y_off.get(),
