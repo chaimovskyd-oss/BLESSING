@@ -2,7 +2,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, colorchooser
 from pathlib import Path
 import json, random, os, sys, subprocess, shutil, math, ctypes
-from PIL import Image, ImageDraw, ImageFont, ImageTk
+from PIL import Image, ImageChops, ImageDraw, ImageFont, ImageTk
 
 try:
     from bidi.algorithm import get_display
@@ -1359,6 +1359,8 @@ class BlessingApp:
         for w in self.step_area.winfo_children(): w.destroy()
 
     def show_step(self, step):
+        if getattr(self, "current_step", None) == "text" and step != "text":
+            self._save_editor_to_target()
         self.current_step = step
         idx = self.step_order.index(step) + 1
         total = len(self.step_order)
@@ -1878,7 +1880,8 @@ class BlessingApp:
                     self.normal_view.pack(fill="both", expand=True)
                 else:
                     self._text_topbar.pack(side="top", fill="x", pady=(0, 8))
-            self._tb_set_target("body")
+            target = getattr(self, "_active_text_target", getattr(self, "_editor_text_target", "body"))
+            self._tb_set_target(target)
 
     def _hide_text_topbar(self):
         if hasattr(self, "_text_topbar"):
@@ -1894,9 +1897,7 @@ class BlessingApp:
             active = tid == target
             btn.configure(bg=BRAND["gold"] if active else BRAND["surface"],
                           fg=BRAND["bg"] if active else BRAND["text"])
-        is_title = target == "title"
-        self._tb_bold_btn.configure(
-            fg=BRAND["text"] if is_title else BRAND["muted"])
+        self._refresh_text_toggle_buttons()
         if hasattr(self, "_tb_spacing_frame") and target == "body":
             self._tb_spacing_frame.pack(side="right")
         elif hasattr(self, "_tb_spacing_frame"):
@@ -1916,10 +1917,13 @@ class BlessingApp:
                 self._tb_size_var.set(size_attr.get())
                 if hasattr(self, "_active_size_var"):
                     self._active_size_var.set(size_attr.get())
+            opacity_attr = getattr(self, f"{t}_opacity", None)
+            if opacity_attr and hasattr(self, "_active_opacity_var"):
+                self._active_opacity_var.set(opacity_attr.get())
             italic_var = getattr(self, f"{t}_italic", None)
             self._tb_italic_var.set(italic_var.get() if italic_var else False)
             bold_var = getattr(self, f"{t}_bold", None)
-            self._tb_bold_var.set(True if t == "title" else (bold_var.get() if bold_var else False))
+            self._tb_bold_var.set(bold_var.get() if bold_var else False)
             self._tb_shadow_var.set(getattr(self, f"{t}_shadow").get())
             self._tb_gradient_var.set(getattr(self, f"{t}_gradient").get())
             self._tb_stroke_var.set(getattr(self, f"{t}_stroke_enabled").get())
@@ -1935,6 +1939,7 @@ class BlessingApp:
                 bg=color,
                 fg="white" if luma < 128 else "#111827",
                 text=f"  ■ {color}  ")
+            self._refresh_text_toggle_buttons()
         except Exception:
             pass
         finally:
@@ -1971,7 +1976,18 @@ class BlessingApp:
                 self.body_stroke_enabled.set(self._tb_stroke_var.get())
         except Exception:
             pass
+        self._refresh_text_toggle_buttons()
         self.schedule_render_preview()
+
+    def _refresh_text_toggle_buttons(self):
+        if hasattr(self, "_tb_bold_btn"):
+            self._tb_bold_btn.configure(
+                bg=BRAND["gold"] if self._tb_bold_var.get() else BRAND["surface"],
+                fg=BRAND["bg"] if self._tb_bold_var.get() else BRAND["text"])
+        if hasattr(self, "_tb_italic_chk"):
+            self._tb_italic_chk.configure(
+                bg=BRAND["gold"] if self._tb_italic_var.get() else BRAND["surface"],
+                fg=BRAND["bg"] if self._tb_italic_var.get() else BRAND["text"])
 
     def _tb_toggle_font_favorite(self):
         font_name = self._tb_font_cb.get()
@@ -2030,6 +2046,18 @@ class BlessingApp:
         except (ValueError, tk.TclError):
             pass
 
+    def _set_active_opacity_from_panel(self):
+        if getattr(self, "_tb_syncing", False):
+            return
+        opacity_attr = getattr(self, f"{self._active_text_target}_opacity", None)
+        if not opacity_attr or not hasattr(self, "_active_opacity_var"):
+            return
+        try:
+            opacity_attr.set(max(0, min(100, int(self._active_opacity_var.get()))))
+            self.schedule_render_preview()
+        except (ValueError, tk.TclError):
+            pass
+
     def _refresh_align_buttons(self):
         align_var = getattr(self, f"{self._active_text_target}_align", self.body_align)
         for value, btn in getattr(self, "_tb_align_btns", {}).items():
@@ -2057,7 +2085,7 @@ class BlessingApp:
             },
             {
                 "id": "balloon", "name": "כתב בלון",
-                "desc": "מילוי שקוף, קו שחור עבה ונקי",
+                "desc": "מילוי שקוף לגמרי, קו שחור עבה ונקי",
                 "color": "#FFFFFF", "opacity": 0, "bold": True, "italic": False,
                 "gradient": False,
                 "stroke": True, "stroke_color": "#020617", "stroke_width": 7,
@@ -2074,15 +2102,6 @@ class BlessingApp:
                 "shadow_angle": 45, "shadow_opacity": 62,
             },
             {
-                "id": "neon", "name": "ניאון",
-                "desc": "טורקיז זוהר, קו כהה וצל צבעוני",
-                "color": "#5EEAD4", "opacity": 100, "bold": True, "italic": False,
-                "gradient": False,
-                "stroke": True, "stroke_color": "#042F2E", "stroke_width": 3,
-                "shadow": True, "shadow_color": "#14B8A6", "shadow_size": 14,
-                "shadow_angle": 35, "shadow_opacity": 70,
-            },
-            {
                 "id": "classic_luxury", "name": "יוקרתי קלאסי",
                 "desc": "כחול כהה, קו זהב דק וצל מינימלי",
                 "color": "#111827", "opacity": 100, "bold": True, "italic": False,
@@ -2093,12 +2112,30 @@ class BlessingApp:
             },
             {
                 "id": "soft_wedding", "name": "חתונה רך",
-                "desc": "ורוד-זהב עדין עם צל קל",
-                "color": "#9F2D55", "opacity": 100, "bold": False, "italic": True,
-                "gradient": True, "gradient_a": "#F9A8D4", "gradient_b": "#F59E0B",
-                "stroke": True, "stroke_color": "#FFF7ED", "stroke_width": 1,
-                "shadow": True, "shadow_color": "#7C2D12", "shadow_size": 4,
-                "shadow_angle": 45, "shadow_opacity": 20,
+                "desc": "גווני שיש אפור עדין עם נגיעה זהובה",
+                "color": "#6B7280", "opacity": 100, "bold": False, "italic": True,
+                "gradient": True, "gradient_a": "#F8FAFC", "gradient_b": "#C9A44C",
+                "stroke": True, "stroke_color": "#D6A84F", "stroke_width": 1,
+                "shadow": True, "shadow_color": "#64748B", "shadow_size": 3,
+                "shadow_angle": 45, "shadow_opacity": 18,
+            },
+            {
+                "id": "black_white_outline", "name": "שחור עם קו לבן",
+                "desc": "כתב שחור ברור עם קו מתאר לבן בעובי 2",
+                "color": "#020617", "opacity": 100, "bold": True, "italic": False,
+                "gradient": False,
+                "stroke": True, "stroke_color": "#FFFFFF", "stroke_width": 2,
+                "shadow": False, "shadow_color": "#000000", "shadow_size": 0,
+                "shadow_angle": 45, "shadow_opacity": 0,
+            },
+            {
+                "id": "white_black_outline", "name": "לבן עם קו שחור",
+                "desc": "כתב לבן נקי עם קו מתאר שחור בעובי 2",
+                "color": "#FFFFFF", "opacity": 100, "bold": True, "italic": False,
+                "gradient": False,
+                "stroke": True, "stroke_color": "#020617", "stroke_width": 2,
+                "shadow": False, "shadow_color": "#000000", "shadow_size": 0,
+                "shadow_angle": 45, "shadow_opacity": 0,
             },
         ]
 
@@ -2350,11 +2387,16 @@ class BlessingApp:
 
         tk.Label(text_tab, text="תיבת טקסט", bg="#111827", fg=BRAND["muted"],
                  font=("Segoe UI", 10)).pack(anchor="e", pady=(0, 6))
+        editor_target = getattr(self, "_editor_text_target", getattr(self, "_active_text_target", "body"))
+        if editor_target not in ("body", "title", "third"):
+            editor_target = "body"
+        self._editor_text_target = editor_target
+        self._active_text_target = editor_target
+
         self.text_box = self._make_text(text_tab, height=10)
         self.text_box.pack(fill="both", expand=True, pady=(0, 14))
         self.text_box.delete("1.0", "end")
-        self.text_box.insert("1.0", self._text_cache)
-        self.root.after(120, lambda: self._set_body_text(self._text_cache, update_widget=True))
+        self.text_box.insert("1.0", self._get_target_text(editor_target))
         self.text_box.bind("<KeyRelease>", lambda e: self.cache_and_render(debounce=True), add="+")
         self.text_box.bind("<FocusIn>", lambda e: self._tb_set_target(getattr(self, "_editor_text_target", "body")))
 
@@ -2373,6 +2415,9 @@ class BlessingApp:
         self._active_size_var = tk.IntVar(value=self.body_size.get())
         self._simple_slider(style_tab, "גודל טקסט נבחר", self._active_size_var, 10, 300)
         self._active_size_var.trace_add("write", lambda *_: self._set_active_size_from_panel())
+        self._active_opacity_var = tk.IntVar(value=self.body_opacity.get())
+        self._simple_slider(style_tab, "אטימות טקסט (0 שקוף)", self._active_opacity_var, 0, 100)
+        self._active_opacity_var.trace_add("write", lambda *_: self._set_active_opacity_from_panel())
         self._font_combo("גופן", self.body_font, style_tab)
         self._simple_slider(style_tab, "ריווח בין שורות", self.body_line_spacing, 80, 180)
         self._simple_slider(style_tab, "ריווח בין אותיות", self.body_letter_spacing, 0, 40)
@@ -2384,7 +2429,7 @@ class BlessingApp:
                       font=("Segoe UI", 10, "bold"), cursor="hand2").pack(side="right", padx=4, fill="x", expand=True)
 
         show_tab("text")
-        self._tb_set_target("body")
+        self._tb_set_target(editor_target)
         self.render_preview()
         return
         self._font_combo_widgets = []
@@ -3217,15 +3262,71 @@ class BlessingApp:
             return bb[2] - bb[0]
         return sum(draw.textbbox((0, 0), ch, font=font)[2] for ch in text) + max(0, len(text) - 1) * spacing
 
-    def _draw_text_with_spacing(self, draw, pos, text, font, fill, spacing=0, stroke_width=0, stroke_fill=None):
+    def _bold_offsets(self, font, enabled):
+        if not enabled:
+            return [(0, 0)]
+        size = int(getattr(font, "size", 48) or 48)
+        radius = 1 if size < 90 else 2 if size < 170 else 3
+        offsets = [(0, 0)]
+        for r in range(1, radius + 1):
+            offsets.extend([(r, 0), (-r, 0), (0, r), (0, -r)])
+        return offsets
+
+    def _draw_text_effect(self, img, draw, pos, text, font, fill, stroke_width=0,
+                          stroke_fill=None, bold=False):
+        stroke_width = int(stroke_width or 0)
+        fill_alpha = int(fill[3]) if len(fill) > 3 else 255
+        offsets = self._bold_offsets(font, bold)
+
+        if fill_alpha <= 0 and stroke_width > 0 and stroke_fill:
+            probe = ImageDraw.Draw(Image.new("L", (1, 1)))
+            bbs = [
+                probe.textbbox((dx, dy), text, font=font, stroke_width=stroke_width)
+                for dx, dy in offsets
+            ]
+            left = min(bb[0] for bb in bbs)
+            top = min(bb[1] for bb in bbs)
+            right = max(bb[2] for bb in bbs)
+            bottom = max(bb[3] for bb in bbs)
+            width = max(1, right - left)
+            height = max(1, bottom - top)
+            stroke_mask = Image.new("L", (width, height), 0)
+            fill_mask = Image.new("L", (width, height), 0)
+            sd = ImageDraw.Draw(stroke_mask)
+            fd = ImageDraw.Draw(fill_mask)
+            for dx, dy in offsets:
+                sd.text((dx - left, dy - top), text, font=font, fill=255,
+                        stroke_width=stroke_width, stroke_fill=255)
+                fd.text((dx - left, dy - top), text, font=font, fill=255)
+            outline_mask = ImageChops.subtract(stroke_mask, fill_mask)
+            layer = Image.new("RGBA", (width, height), stroke_fill)
+            layer.putalpha(outline_mask)
+            img.alpha_composite(layer, (int(pos[0] + left), int(pos[1] + top)))
+            return
+
+        if fill_alpha <= 0:
+            return
+
+        for dx, dy in offsets:
+            draw.text((pos[0] + dx, pos[1] + dy), text, font=font, fill=fill,
+                      stroke_width=stroke_width, stroke_fill=stroke_fill)
+
+    def _draw_text_with_spacing(self, draw, pos, text, font, fill, spacing=0,
+                                stroke_width=0, stroke_fill=None, bold=False):
+        offsets = self._bold_offsets(font, bold)
+        fill_alpha = int(fill[3]) if len(fill) > 3 else 255
+        if fill_alpha <= 0 and not stroke_width:
+            return
         if not spacing:
-            draw.text(pos, text, font=font, fill=fill,
-                      stroke_width=int(stroke_width or 0), stroke_fill=stroke_fill)
+            for dx, dy in offsets:
+                draw.text((pos[0] + dx, pos[1] + dy), text, font=font, fill=fill,
+                          stroke_width=int(stroke_width or 0), stroke_fill=stroke_fill)
             return
         x, y = pos
         for ch in text:
-            draw.text((x, y), ch, font=font, fill=fill,
-                      stroke_width=int(stroke_width or 0), stroke_fill=stroke_fill)
+            for dx, dy in offsets:
+                draw.text((x + dx, y + dy), ch, font=font, fill=fill,
+                          stroke_width=int(stroke_width or 0), stroke_fill=stroke_fill)
             bb = draw.textbbox((0, 0), ch, font=font, stroke_width=int(stroke_width or 0))
             x += (bb[2] - bb[0]) + spacing
 
@@ -3323,8 +3424,11 @@ class BlessingApp:
                     self.title_gradient_mode.get(), self.title_gradient_angle.get(),
                     t_stroke, self.title_stroke_color.get())
             else:
-                d.text((tx, title_y), vis, font=tfont, fill=hex_to_rgb(self.title_color.get())+(title_alpha,),
-                       stroke_width=int(t_stroke), stroke_fill=hex_to_rgb(self.title_stroke_color.get())+(255,))
+                self._draw_text_effect(
+                    img, d, (tx, title_y), vis, tfont,
+                    hex_to_rgb(self.title_color.get()) + (title_alpha,),
+                    t_stroke, hex_to_rgb(self.title_stroke_color.get()) + (255,),
+                    bold=t_bold)
 
         # body
         body_text = self._text_cache.strip() or "הקלד/י כאן את הברכה..."
@@ -3361,10 +3465,10 @@ class BlessingApp:
                 shadow = self._shadow_args("body")
                 if shadow:
                     dx, dy, fill = shadow
-                    self._draw_text_with_spacing(d, (x + dx, y + dy), vis, font, fill, letter_spacing)
+                    self._draw_text_with_spacing(d, (x + dx, y + dy), vis, font, fill, letter_spacing, bold=b_bold)
                 self._draw_text_with_spacing(
                     d, (x, y), vis, font, body_rgb+(body_alpha,), letter_spacing,
-                    b_stroke, hex_to_rgb(self.body_stroke_color.get())+(255,))
+                    b_stroke, hex_to_rgb(self.body_stroke_color.get())+(255,), bold=b_bold)
             elif self.body_gradient.get() and body_alpha > 0:
                 self._draw_shadow(d, "body", (x, y), vis, font)
                 draw_gradient_text(
@@ -3374,8 +3478,10 @@ class BlessingApp:
                     b_stroke, self.body_stroke_color.get())
             else:
                 self._draw_shadow(d, "body", (x, y), vis, font)
-                d.text((x, y), vis, font=font, fill=body_rgb+(body_alpha,),
-                       stroke_width=int(b_stroke), stroke_fill=hex_to_rgb(self.body_stroke_color.get())+(255,))
+                self._draw_text_effect(
+                    img, d, (x, y), vis, font, body_rgb + (body_alpha,),
+                    b_stroke, hex_to_rgb(self.body_stroke_color.get()) + (255,),
+                    bold=b_bold)
             y += line_h
 
         if self.third_enabled.get() and self.third_text.get().strip():
@@ -3411,8 +3517,11 @@ class BlessingApp:
                     th_stroke, self.third_stroke_color.get())
             else:
                 self._draw_shadow(d, "third", (th_x, th_y), third, th_font)
-                d.text((th_x, th_y), third, font=th_font, fill=hex_to_rgb(self.third_color.get())+(third_alpha,),
-                       stroke_width=int(th_stroke), stroke_fill=hex_to_rgb(self.third_stroke_color.get())+(255,))
+                self._draw_text_effect(
+                    img, d, (th_x, th_y), third, th_font,
+                    hex_to_rgb(self.third_color.get()) + (third_alpha,),
+                    th_stroke, hex_to_rgb(self.third_stroke_color.get()) + (255,),
+                    bold=getattr(self, "third_bold", tk.BooleanVar(value=False)).get())
 
         return img.convert("RGB")
 
